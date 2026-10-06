@@ -1,0 +1,580 @@
+// =======================================================================
+// PKC Management Consulting — Accounts Payable OCR Apps Script Extensions
+// (Tally Ledger Sync & Accounts Payable Invoice Database)
+// =======================================================================
+
+// Both database tabs are targeted strictly by their integer Sheet ID (GID),
+// never by name, so renaming a tab in the UI never breaks data persistence.
+const INVOICE_DATABASE_GID = 0;
+const ITEM_DATABASE_GID = 432714987;
+
+function getSheetByGid(ss, targetGid) {
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].getSheetId() === Number(targetGid)) {
+      return sheets[i];
+    }
+  }
+  return null;
+}
+
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('PKC AP Automation')
+      .addItem('Setup Invoice Sheet Headers', 'setupInvoiceSheet')
+      .addItem('Setup Item Sheet Headers', 'setupItemSheet')
+      .addItem('Export Approved to Tally (Excel)', 'exportApprovedToTally')
+      .addToUi();
+}
+
+// Invoice-wise Database (GID 0) header sequence — keep in sync with doPost's inline
+// setup below and with the payload built in backend/main.py's map_invoice_to_bill_data.
+var INVOICE_HEADERS = [
+  "Timestamp",              // A
+  "File Name",               // B
+  "Vendor Name",              // C
+  "Invoice Date",              // D
+  "Expense Category",           // E
+  "Invoice Number",              // F
+  "Vendor GSTIN",                 // G
+  "Taxable Amount",                 // H
+  "CGST",                             // I
+  "SGST",                              // J
+  "IGST",                               // K
+  "Cess",                                // L
+  "Discount",                             // M
+  "Round Off",                             // N
+  "Additional Charges",                     // O <--- NEW COLUMN
+  "Total Amount",                           // P
+  "Due Date",                                // Q
+  "Confidence",                                // R
+  "Tally Ledger Name",                           // S
+  "Approval Status",                              // T
+  "Approver Name",                                 // U
+  "Approval Date",                                  // V
+  "Rejection Reason",                                // W
+  "Remarks"                                           // X
+];
+
+function setupInvoiceSheet() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var headers = INVOICE_HEADERS;
+
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  var range = sheet.getRange(1, 1, 1, headers.length);
+  range.setFontWeight("bold");
+  range.setBackground("#0F2942");
+  range.setFontColor("#FFFFFF");
+
+  // Approval Status dropdown now lives in Col T (column 20)
+  var cell = sheet.getRange("T2:T5000");
+  var rule = SpreadsheetApp.newDataValidation().requireValueInList(["Pending L1", "Pending", "Approved", "Rejected"], true).build();
+  cell.setDataValidation(rule);
+
+  SpreadsheetApp.getUi().alert("Invoice sheet headers setup complete! Approval Status validation dropdown has been configured.");
+}
+
+function setupItemSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var itemSheet = getSheetByGid(ss, ITEM_DATABASE_GID) || ss.getActiveSheet();
+  var itemHeaders = ITEM_HEADERS;
+
+  itemSheet.getRange(1, 1, 1, itemHeaders.length).setValues([itemHeaders]);
+  var range = itemSheet.getRange(1, 1, 1, itemHeaders.length);
+  range.setFontWeight("bold");
+  range.setBackground("#0F2942");
+  range.setFontColor("#FFFFFF");
+
+  // Line Type validation dropdown in Col E (column 5) — explicitly accepts 'Discount'
+  var lineTypeRange = itemSheet.getRange("E2:E5000");
+  var lineTypeRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(["Stock Item", "Service", "Additional Charge", "Discount", "Round Off"], true)
+    .build();
+  lineTypeRange.setDataValidation(lineTypeRule);
+
+  // Approval Status dropdown in Col U (column 21)
+  var cell = itemSheet.getRange("U2:U5000");
+  var rule = SpreadsheetApp.newDataValidation().requireValueInList(["Pending L1", "Pending", "Approved", "Rejected"], true).build();
+  cell.setDataValidation(rule);
+
+  SpreadsheetApp.getUi().alert("Item sheet headers setup complete! Line Type (accepting 'Discount') and Approval Status validations configured.");
+}
+
+function exportApprovedToTally() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getActiveSheet();
+  var lastRow = sheet.getLastRow();
+  
+  if (lastRow <= 1) {
+    SpreadsheetApp.getUi().alert("No invoice records found in sheet.");
+    return;
+  }
+  
+  var lastCol = sheet.getLastColumn();
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  
+  var colIdx = {};
+  for (var i = 0; i < headers.length; i++) {
+    colIdx[headers[i].trim()] = i;
+  }
+  
+  // Basic validation that we have the headers
+  if (colIdx["Approval Status"] === undefined) {
+    SpreadsheetApp.getUi().alert("Could not find 'Approval Status' column. Please run 'Setup Invoice Sheet Headers' first.");
+    return;
+  }
+  
+  var approvedData = [];
+  for (var r = 0; r < values.length; r++) {
+    var row = values[r];
+    var status = row[colIdx["Approval Status"]];
+    if (status && String(status).trim().toLowerCase() === "approved") {
+      var item = {};
+      for (var key in colIdx) {
+        item[key] = row[colIdx[key]];
+      }
+      approvedData.push(item);
+    }
+  }
+  
+  if (approvedData.length === 0) {
+    SpreadsheetApp.getUi().alert("No entries with 'Approved' status found to export!");
+    return;
+  }
+  
+  var csvContent = generateTallyCSV(approvedData);
+  var base64Csv = Utilities.base64Encode(csvContent, Utilities.Charset.UTF_8);
+  
+  var html = "<div style='font-family:sans-serif;padding:10px;'>" +
+             "<h3 style='color:#0F2942;margin-top:0;'>Tally Export Ready</h3>" +
+             "<p>Found <b>" + approvedData.length + "</b> approved purchase entries.</p>" +
+             "<a href='data:text/csv;charset=utf-8;base64," + base64Csv + "' download='Tally_Purchase_Register.csv' style='display:inline-block;padding:10px 18px;background:#10B981;color:white;text-decoration:none;border-radius:6px;font-weight:bold;margin-bottom:10px;'>Download CSV for Tally</a>" +
+             "<p style='color:#6B7280;font-size:11px;margin:0;'>This file can be opened directly in Microsoft Excel and imported into Tally.</p>" +
+             "</div>";
+             
+  var userInterface = HtmlService.createHtmlOutput(html)
+      .setWidth(360)
+      .setHeight(180);
+      
+  SpreadsheetApp.getUi().showModalDialog(userInterface, 'PKC Management Consulting - Tally Export');
+}
+
+function generateTallyCSV(data) {
+  var tallyHeaders = [
+    "Voucher Date", "Voucher No", "Voucher Type", "Ref No", "Ref Date",
+    "Party Ledger Name", "GSTIN/UIN", "Expense Ledger", "Purchase Value (Taxable Amount)",
+    "CGST Amount", "SGST Amount", "IGST Amount", "Total Amount", "Narration"
+  ];
+  
+  var rows = [tallyHeaders.join(",")];
+  
+  for (var i = 0; i < data.length; i++) {
+    var r = data[i];
+    
+    var dateVal = r["Invoice Date"] || r["Timestamp"] || "";
+    var dateStr = "";
+    if (dateVal) {
+      if (dateVal instanceof Date) {
+        dateStr = Utilities.formatDate(dateVal, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      } else {
+        dateStr = String(dateVal).split("T")[0];
+      }
+    }
+    
+    var voucherNo = r["Invoice Number"] || "";
+    var partyName = r["Vendor Name"] || "Cash/General Vendor";
+    var gstin = r["Vendor GSTIN"] || "";
+    var expenseLedger = r["Expense Category"] || "Purchase Account";
+    var taxable = parseFloat(r["Taxable Amount"] || 0);
+    var cgst = parseFloat(r["CGST"] || 0);
+    var sgst = parseFloat(r["SGST"] || 0);
+    var igst = parseFloat(r["IGST"] || 0);
+    var total = parseFloat(r["Total Amount"] || 0);
+    var narration = "Tally import from PKC Management Consulting AP OCR. Ref Invoice No: " + voucherNo + ". Remarks: " + (r["Remarks"] || "");
+    
+    var row = [
+      escapeCsv(dateStr),
+      escapeCsv(voucherNo),
+      "Purchase",
+      escapeCsv(voucherNo),
+      escapeCsv(dateStr),
+      escapeCsv(partyName),
+      escapeCsv(gstin),
+      escapeCsv(expenseLedger),
+      taxable.toFixed(2),
+      cgst.toFixed(2),
+      sgst.toFixed(2),
+      igst.toFixed(2),
+      total.toFixed(2),
+      escapeCsv(narration)
+    ];
+    
+    rows.push(row.join(","));
+  }
+  
+  return rows.join("\r\n");
+}
+
+function escapeCsv(val) {
+  if (val === null || val === undefined) return "";
+  var str = String(val).replace(/"/g, '""');
+  if (str.indexOf(",") !== -1 || str.indexOf("\n") !== -1 || str.indexOf('"') !== -1) {
+    return '"' + str + '"';
+  }
+  return str;
+}
+
+// =======================================================================
+// AP Invoice Database Webhook — Google Sheet Persistence
+// =======================================================================
+// Instructions:
+// 1. Open a new Google Sheet at https://sheets.new
+// 2. Go to Extensions -> Apps Script
+// 3. Clear existing code and paste this ENTIRE script into Code.gs
+// 4. Click Deploy -> New deployment
+// 5. Select type: Web app
+// 6. Execute as: Me
+// 7. Who has access: Anyone
+// 8. Click Deploy, grant permissions, and copy your Web App URL!
+// 9. Enter the Web App URL in the AP OCR app's Google Sheet DB tab.
+
+function doGet(e) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var dbSheet = getSheetByGid(ss, INVOICE_DATABASE_GID) || ss.getSheets()[0];
+    var data = readSheetData(dbSheet);
+    return jsonResponse(data);
+  } catch (err) {
+    return jsonResponse({ status: "error", message: err.toString() });
+  }
+}
+
+function doPost(e) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var dbSheet = getSheetByGid(ss, INVOICE_DATABASE_GID);
+
+    if (!dbSheet) {
+      return jsonResponse({ status: "error", message: "Invoice Database sheet (GID " + INVOICE_DATABASE_GID + ") not found." });
+    }
+
+    var body = {};
+    if (e && e.postData && e.postData.contents) {
+      body = JSON.parse(e.postData.contents);
+    }
+
+    var action = body.action || (e && e.parameter ? e.parameter.action : "");
+
+    if (action === "clear_all") {
+      var lastRow = dbSheet.getLastRow();
+      if (lastRow > 1) {
+        dbSheet.deleteRows(2, lastRow - 1);
+      }
+      var itemSheetToClear = getSheetByGid(ss, ITEM_DATABASE_GID);
+      if (itemSheetToClear) {
+        var itemLastRow = itemSheetToClear.getLastRow();
+        if (itemLastRow > 1) {
+          itemSheetToClear.deleteRows(2, itemLastRow - 1);
+        }
+      }
+      return jsonResponse({ status: "success", message: "Database sheet cleared successfully." });
+    }
+
+    if (dbSheet.getLastRow() === 0) {
+      var invoiceHeaders = INVOICE_HEADERS;
+      dbSheet.getRange(1, 1, 1, invoiceHeaders.length).setValues([invoiceHeaders]);
+      var invoiceHeaderRange = dbSheet.getRange(1, 1, 1, invoiceHeaders.length);
+      invoiceHeaderRange.setFontWeight("bold");
+      invoiceHeaderRange.setBackground("#0F2942");
+      invoiceHeaderRange.setFontColor("#FFFFFF");
+
+      var approvalCell = dbSheet.getRange("T2:T5000");
+      var approvalRule = SpreadsheetApp.newDataValidation().requireValueInList(["Pending L1", "Pending", "Approved", "Rejected"], true).build();
+      approvalCell.setDataValidation(approvalRule);
+    }
+
+    var rowsToAppend = [];
+    if (Array.isArray(body)) {
+      rowsToAppend = body;
+    } else if (body.invoices && Array.isArray(body.invoices)) {
+      rowsToAppend = body.invoices;
+    } else {
+      rowsToAppend = [body];
+    }
+
+    var lastRow = dbSheet.getLastRow();
+    var existingValues = [];
+    if (lastRow > 1) {
+      existingValues = dbSheet.getRange(2, 1, lastRow - 1, INVOICE_HEADERS.length).getValues();
+    }
+
+    var appendedCount = 0;
+    var updatedCount = 0;
+
+    for (var i = 0; i < rowsToAppend.length; i++) {
+      var item = rowsToAppend[i];
+      var invNo = String(item.invoice_no || item.invoice_number || "").trim().toLowerCase();
+      var vendor = String(item.merchant || item.vendor_name || "").trim().toLowerCase();
+      var gstin = String(item.vendor_tax_id || item.gstin || "").trim().toLowerCase();
+      var cleanInv = invNo.replace(/[^a-z0-9]/g, "");
+
+      var row = [
+        item.timestamp || new Date().toISOString(),                        // A Timestamp
+        item.file_name || "",                                              // B File Name
+        item.merchant || item.vendor_name || "",                          // C Vendor Name
+        item.date || item.invoice_date || "",                             // D Invoice Date
+        item.category || "",                                              // E Expense Category
+        item.invoice_no || item.invoice_number || "",                     // F Invoice Number
+        item.vendor_tax_id || item.gstin || "",                           // G Vendor GSTIN
+        item.taxable_amount || "",                                        // H Taxable Amount
+        item.cgst || "",                                                  // I CGST
+        item.sgst || "",                                                  // J SGST
+        item.igst || "",                                                  // K IGST
+        (item.cess !== undefined && item.cess !== null) ? item.cess : 0.0, // L Cess
+        (item.discount_amount !== undefined && item.discount_amount !== null) ? item.discount_amount : 0.0, // M Discount
+        (item.round_off_amount !== undefined && item.round_off_amount !== null) ? item.round_off_amount : 0.0, // N Round Off
+        (item.additional_charges_amount !== undefined && item.additional_charges_amount !== null) ? item.additional_charges_amount : 0.0, // O Additional Charges
+        item.total || item.total_amount || "",                           // P Total Amount
+        item.due_date || "",                                              // Q Due Date
+        item.confidence || item.overall_confidence || "",                // R Confidence
+        "",                                                                // S Tally Ledger Name (left blank for manual ledger mapping)
+        item.approval_status || "Pending L1",                             // T Approval Status
+        "",                                                                // U Approver Name
+        "",                                                                // V Approval Date
+        "",                                                                // W Rejection Reason
+        item.remarks || item.extraction_notes || ""                      // X Remarks
+      ];
+
+      var matchRowIdx = -1;
+      if (cleanInv.length > 0 && existingValues.length > 0) {
+        for (var r = 0; r < existingValues.length; r++) {
+          var exVendor = String(existingValues[r][2] || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+          var exInv = String(existingValues[r][5] || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+          var exGstin = String(existingValues[r][6] || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+
+          if (exInv === cleanInv) {
+            if ((gstin.length > 0 && exGstin === gstin.replace(/[^a-z0-9]/g, "")) || 
+                (vendor.length > 0 && exVendor === vendor.replace(/[^a-z0-9]/g, ""))) {
+              matchRowIdx = r + 2;
+              break;
+            }
+          }
+        }
+      }
+
+      if (matchRowIdx > 0) {
+        dbSheet.getRange(matchRowIdx, 1, 1, row.length).setValues([row]);
+        updatedCount++;
+      } else {
+        dbSheet.appendRow(row);
+        appendedCount++;
+      }
+
+      if (item.line_items && Array.isArray(item.line_items) && item.line_items.length > 0) {
+        writeLineItemsToItemSheet(ss, item);
+      }
+    }
+
+    return jsonResponse({
+      status: "success",
+      message: "Synced " + (appendedCount + updatedCount) + " AP Invoice row(s) to Database sheet (" + updatedCount + " updated, " + appendedCount + " new).",
+      appended: appendedCount,
+      updated: updatedCount
+    });
+
+  } catch (err) {
+    return jsonResponse({ status: "error", message: err.toString() });
+  }
+}
+
+// =======================================================================
+// Item-wise Database Write — GID-targeted line item persistence
+// =======================================================================
+
+// Item-wise Database (GID 432714987) header sequence — keep in sync with
+// backend/main.py's map_invoice_to_bill_data line_items payload.
+var ITEM_HEADERS = [
+  "Timestamp",                 // A
+  "Invoice Number",            // B
+  "Vendor Name",                // C
+  "Invoice Date",                // D
+  "Line Type",                    // E
+  "Item Description",              // F
+  "HSN/SAC",                        // G
+  "Quantity",                        // H
+  "Unit",                              // I
+  "Unit Price",                         // J
+  "Taxable Amount",                      // K
+  "Tax Rate (%)",                         // L
+  "CGST Amount",                           // M
+  "SGST Amount",                            // N
+  "IGST Amount",                             // O
+  "Cess Amount",                               // P
+  "Discount Amount",                            // Q
+  "Line Total",                                  // R
+  "Supplier Ledger Name",                         // S
+  "Mapped Tally Stock Item",                       // T
+  "Approval Status",                                // U
+  "Approver Name",                                   // V
+  "Approval Date",                                    // W
+  "Rejection Reason"                                   // X
+];
+
+function writeLineItemsToItemSheet(ss, body) {
+  var itemSheet = getSheetByGid(ss, ITEM_DATABASE_GID);
+  if (!itemSheet) return;
+
+  var itemHeaders = ITEM_HEADERS;
+
+  if (itemSheet.getLastRow() === 0) {
+    itemSheet.getRange(1, 1, 1, itemHeaders.length).setValues([itemHeaders]);
+    var itemHeaderRange = itemSheet.getRange(1, 1, 1, itemHeaders.length);
+    itemHeaderRange.setFontWeight("bold");
+    itemHeaderRange.setBackground("#0F2942");
+    itemHeaderRange.setFontColor("#FFFFFF");
+
+    // Line Type validation dropdown in Col E (column 5) — explicitly accepts 'Discount'
+    var lineTypeRange = itemSheet.getRange("E2:E5000");
+    var lineTypeRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(["Stock Item", "Service", "Additional Charge", "Discount", "Round Off"], true)
+      .build();
+    lineTypeRange.setDataValidation(lineTypeRule);
+
+    // Approval Status dropdown in Col U (column 21)
+    var approvalCell = itemSheet.getRange("U2:U5000");
+    var approvalRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(["Pending L1", "Pending", "Approved", "Rejected"], true)
+      .build();
+    approvalCell.setDataValidation(approvalRule);
+  }
+
+  var invoiceNo = String(body.invoice_no || body.invoice_number || "").trim();
+  var vendorName = String(body.merchant || body.vendor_name || "").trim();
+
+  // Deduplication: remove any prior item rows for this Invoice Number + Vendor Name
+  // (the item-wise sheet no longer stores GSTIN as a column).
+  var lastRow = itemSheet.getLastRow();
+  if (lastRow > 1) {
+    var lastCol = itemSheet.getLastColumn();
+    var existing = itemSheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    var rowsToDelete = [];
+    for (var r = 0; r < existing.length; r++) {
+      var exInvoiceNo = String(existing[r][1] || "").trim();
+      var exVendorName = String(existing[r][2] || "").trim();
+      if (exInvoiceNo === invoiceNo && exVendorName === vendorName) {
+        rowsToDelete.push(r + 2);
+      }
+    }
+    for (var d = rowsToDelete.length - 1; d >= 0; d--) {
+      itemSheet.deleteRow(rowsToDelete[d]);
+    }
+  }
+
+  var timestamp = body.timestamp || new Date().toISOString();
+  var invoiceDate = body.date || body.invoice_date || "";
+
+  var newRows = [];
+  for (var i = 0; i < body.line_items.length; i++) {
+    var li = body.line_items[i];
+    var lineType = li.line_type || li.classification || li.item_type || "Stock Item";
+    var isDiscount = String(lineType).trim().toLowerCase() === "discount";
+    var itemDesc = li.description || li.item_name || (isDiscount ? "Discount" : "");
+    var qty = (li.quantity !== null && li.quantity !== undefined && li.quantity !== "") ? li.quantity : (isDiscount ? 1 : "");
+
+    var unitPrice = (li.unit_price !== null && li.unit_price !== undefined && li.unit_price !== "") ? li.unit_price : "";
+    var taxableAmount = (li.taxable_amount !== null && li.taxable_amount !== undefined && li.taxable_amount !== "") ? li.taxable_amount : ((li.taxable_value !== null && li.taxable_value !== undefined && li.taxable_value !== "") ? li.taxable_value : "");
+    var lineTotal = (li.line_total !== null && li.line_total !== undefined && li.line_total !== "") ? li.line_total : ((li.total_amount !== null && li.total_amount !== undefined && li.total_amount !== "") ? li.total_amount : "");
+
+    // Preserve negative values without stripping negative signs for discount items
+    if (isDiscount) {
+      if (unitPrice !== "" && !isNaN(Number(unitPrice))) {
+        unitPrice = -Math.abs(Number(unitPrice));
+      }
+      if (taxableAmount !== "" && !isNaN(Number(taxableAmount))) {
+        taxableAmount = -Math.abs(Number(taxableAmount));
+      }
+      if (lineTotal !== "" && !isNaN(Number(lineTotal))) {
+        lineTotal = -Math.abs(Number(lineTotal));
+      }
+    }
+
+    var cgstAmt = (li.cgst !== null && li.cgst !== undefined) ? li.cgst : (li.cgst_amount || 0.0);
+    var sgstAmt = (li.sgst !== null && li.sgst !== undefined) ? li.sgst : (li.sgst_amount || 0.0);
+    var igstAmt = (li.igst !== null && li.igst !== undefined) ? li.igst : (li.igst_amount || 0.0);
+    var cessAmt = (li.cess !== null && li.cess !== undefined) ? li.cess : 0.0;
+    // Rule 1: per-item discount baked into a Stock Item/Service row's own taxable
+    // amount — never populated for synthetic Discount/Additional Charge/Round Off rows.
+    var discountAmt = (li.discount_amount !== null && li.discount_amount !== undefined) ? li.discount_amount : 0.0;
+
+    if (isDiscount) {
+      if (cgstAmt && !isNaN(Number(cgstAmt)) && Number(cgstAmt) !== 0) cgstAmt = -Math.abs(Number(cgstAmt));
+      if (sgstAmt && !isNaN(Number(sgstAmt)) && Number(sgstAmt) !== 0) sgstAmt = -Math.abs(Number(sgstAmt));
+      if (igstAmt && !isNaN(Number(igstAmt)) && Number(igstAmt) !== 0) igstAmt = -Math.abs(Number(igstAmt));
+      if (cessAmt && !isNaN(Number(cessAmt)) && Number(cessAmt) !== 0) cessAmt = -Math.abs(Number(cessAmt));
+    }
+
+    newRows.push([
+      timestamp,                                                          // A Timestamp
+      invoiceNo,                                                          // B Invoice Number
+      vendorName,                                                         // C Vendor Name
+      invoiceDate,                                                        // D Invoice Date
+      lineType,                                                           // E Line Type
+      itemDesc,                                                           // F Item Description
+      li.hsn_sac || "",                                                   // G HSN/SAC
+      qty,                                                                // H Quantity
+      li.unit || "",                                                      // I Unit
+      unitPrice,                                                          // J Unit Price
+      taxableAmount,                                                      // K Taxable Amount
+      (li.tax_rate_percent !== null && li.tax_rate_percent !== undefined) ? li.tax_rate_percent : "", // L Tax Rate (%)
+      cgstAmt,                                                            // M CGST Amount
+      sgstAmt,                                                            // N SGST Amount
+      igstAmt,                                                            // O IGST Amount
+      cessAmt,                                                            // P Cess Amount
+      discountAmt,                                                        // Q Discount Amount
+      lineTotal,                                                          // R Line Total
+      "",                                                                  // S Supplier Ledger Name
+      "",                                                                  // T Mapped Tally Stock Item
+      item.approval_status || "Pending L1",                                // U Approval Status
+      "",                                                                  // V Approver Name
+      "",                                                                  // W Approval Date
+      ""                                                                   // X Rejection Reason
+    ]);
+  }
+
+  if (newRows.length > 0) {
+    itemSheet.getRange(itemSheet.getLastRow() + 1, 1, newRows.length, itemHeaders.length).setValues(newRows);
+  }
+}
+
+function jsonResponse(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function readSheetData(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+  
+  var lastCol = sheet.getLastColumn();
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  
+  var list = [];
+  for (var r = 0; r < values.length; r++) {
+    var item = {};
+    for (var c = 0; c < headers.length; c++) {
+      var val = values[r][c];
+      if (val instanceof Date) {
+        val = val.toISOString();
+      }
+      item[headers[c]] = val;
+    }
+    list.push(item);
+  }
+  return list;
+}
+
+function appendRowData(sheet, dataArray) {
+  sheet.appendRow(dataArray);
+}

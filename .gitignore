@@ -1,0 +1,67 @@
+# Environment files
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.venv/
+backend/.venv/
+ENV/
+env/
+
+# Node
+node_modules/
+.pnp
+.pnp.js
+coverage
+dist
+dist-ssr
+*.local
+.npm
+.eslintcache
+.vite/
+frontend/.vite/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+logs/
+*.log
+
+# Binaries & Tools
+tools/*.exe
+
+# Runtime upload cache — raw uploaded invoice files, not source
+backend/data/uploads/*
+!backend/data/uploads/.gitkeep
+
+# Local CSV audit-trail databases — contain real vendor/GSTIN/financial data,
+# never enter version control (mirrors backend/data/uploads/* above).
+backend/data/*.csv
+
+# OS
+.DS_Store
+Thumbs.db

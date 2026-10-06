@@ -1,0 +1,38 @@
+[
+  {
+    "id": "v1",
+    "name": "ZEN Manufacturers",
+    "gstin": "29ABCDE1234F1Z5",
+    "address": "Sector-65, Hali, Punjab, India, 201017, Kharar, Punjab, India - 140301",
+    "gst_treatment": "Regular",
+    "source_of_supply": "Punjab",
+    "destination_of_supply": "Karnataka"
+  },
+  {
+    "id": "v2",
+    "name": "Oceanus Industries",
+    "gstin": "21ABCDE1234F1Z5",
+    "address": "Main Industrial Area, Bhubaneswar, Odisha, 751001",
+    "gst_treatment": "Regular",
+    "source_of_supply": "Odisha",
+    "destination_of_supply": "Uttar Pradesh"
+  },
+  {
+    "id": "v3",
+    "name": "Global Agri-Products",
+    "gstin": "09ABCDE1234F1Z5",
+    "address": "Agricultural Hub, Lucknow, Uttar Pradesh, 226001",
+    "gst_treatment": "Regular",
+    "source_of_supply": "Uttar Pradesh",
+    "destination_of_supply": "Uttar Pradesh"
+  },
+  {
+    "id": "v4",
+    "name": "Smart Seeds Ltd",
+    "gstin": "03ABCDE1234F1Z5",
+    "address": "12 Seed Growers Complex, Ludhiana, Punjab, 141001",
+    "gst_treatment": "Regular",
+    "source_of_supply": "Punjab",
+    "destination_of_supply": "Haryana"
+  }
+]

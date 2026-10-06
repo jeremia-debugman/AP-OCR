@@ -1,0 +1,148 @@
+{
+  "categories": [
+    {
+      "category": "Team Lunch",
+      "per_bill": "1,0000",
+      "per_day": "200",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    },
+    {
+      "category": "Client Meeting",
+      "per_bill": "",
+      "per_day": "",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    },
+    {
+      "category": "Office Grocery",
+      "per_bill": "",
+      "per_day": "",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    },
+    {
+      "category": "Fuel",
+      "per_bill": "",
+      "per_day": "",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    },
+    {
+      "category": "Travel",
+      "per_bill": "",
+      "per_day": "",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    },
+    {
+      "category": "Flight",
+      "per_bill": "",
+      "per_day": "",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    },
+    {
+      "category": "Hotel",
+      "per_bill": "",
+      "per_day": "",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    },
+    {
+      "category": "Parking",
+      "per_bill": "",
+      "per_day": "",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    },
+    {
+      "category": "Office Supplies",
+      "per_bill": "",
+      "per_day": "",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    },
+    {
+      "category": "Maintenance",
+      "per_bill": "",
+      "per_day": "",
+      "per_month": "",
+      "gst_above": "",
+      "receipt_above": "",
+      "window": "",
+      "block": false,
+      "gst_credit": false,
+      "gl": ""
+    }
+  ],
+  "mileage": [
+    {
+      "vehicle_type": "Two-wheeler",
+      "rate_per_km": "4.00",
+      "monthly_cap": ""
+    },
+    {
+      "vehicle_type": "Four-wheeler",
+      "rate_per_km": "9.00",
+      "monthly_cap": ""
+    }
+  ],
+  "perdiem": [
+    {
+      "travel_type": "Domestic",
+      "rate_per_day": "1,200",
+      "gl_code": ""
+    },
+    {
+      "travel_type": "International",
+      "rate_per_day": "\u2014",
+      "gl_code": ""
+    }
+  ]
+}

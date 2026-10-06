@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Agro ERP — Reimbursements</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0A0F1C;
+    --surface:#111A2E;
+    --surface-2:#16213A;
+    --surface-3:#1C2A46;
+    --border:#22314F;
+    --border-soft:#1A2540;
+    --text:#E4E9F4;
+    --text-dim:#8C9BBF;
+    --text-faint:#5C6C90;
+    --green:#22C97A;
+    --green-dim:#16643F;
+    --green-bg:rgba(34,201,122,0.10);
+    --amber:#F5A623;
+    --amber-bg:rgba(245,166,35,0.10);
+    --red:#EF5A6F;
+    --red-bg:rgba(239,90,111,0.10);
+    --haiku:#5EC8D8;
+    --haiku-bg:rgba(94,200,216,0.12);
+    --sonnet:#B98CE8;
+    --sonnet-bg:rgba(185,140,232,0.12);
+    --radius:10px;
+    --font-ui:'Inter',system-ui,sans-serif;
+    --font-mono:'JetBrains Mono',monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--font-ui);
+    font-size:14px;
+    line-height:1.5;
+    min-height:100vh;
+  }
+  .app{max-width:1320px; margin:0 auto; padding:0 24px 64px;}
+
+  /* ---------- Header ---------- */
+  header{
+    padding:22px 0 0;
+    display:flex; align-items:center; justify-content:space-between;
+    border-bottom:1px solid var(--border-soft);
+    padding-bottom:16px;
+    margin-bottom:20px;
+    flex-wrap:wrap; gap:14px;
+  }
+  .brand{display:flex; align-items:center; gap:11px;}
+  .brand-mark{
+    width:34px; height:34px; border-radius:8px;
+    background:linear-gradient(135deg,var(--green) 0%, #0F8F55 100%);
+    display:flex; align-items:center; justify-content:center;
+    font-weight:800; font-size:15px; color:#052113;
+    flex-shrink:0;
+  }
+  .brand-text .name{font-weight:700; font-size:15px; letter-spacing:0.2px;}
+  .brand-text .sub{font-size:11.5px; color:var(--text-faint); letter-spacing:0.3px;}
+  .role-switch{
+    display:flex; background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:3px; gap:2px;
+  }
+  .role-switch button{
+    border:none; background:transparent; color:var(--text-dim); font-family:var(--font-ui);
+    font-size:12.5px; font-weight:600; padding:8px 16px; border-radius:999px; cursor:pointer;
+    transition:all .15s ease; letter-spacing:0.2px;
+  }
+  .role-switch button.active{background:var(--green); color:#052113;}
+  .role-switch button:not(.active):hover{color:var(--text);}
+
+  /* ---------- Nav tabs ---------- */
+  .tabbar{display:flex; gap:6px; margin-bottom:22px; border-bottom:1px solid var(--border-soft);}
+  .tabbar button{
+    background:none; border:none; color:var(--text-faint); font-family:var(--font-ui);
+    font-size:13.5px; font-weight:600; padding:11px 6px; margin-right:22px; cursor:pointer;
+    border-bottom:2px solid transparent; letter-spacing:0.15px;
+  }
+  .tabbar button.active{color:var(--text); border-bottom-color:var(--green);}
+  .tabbar button:hover:not(.active){color:var(--text-dim);}
+
+  .view{display:none;}
+  .view.active{display:block;}
+
+  /* ---------- Cards / layout ---------- */
+  .grid2{display:grid; grid-template-columns:1.05fr 1fr; gap:20px;}
+  @media(max-width:920px){.grid2{grid-template-columns:1fr;}}
+  .card{
+    background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius);
+    padding:20px;
+  }
+  .card + .card{margin-top:16px;}
+  .card-title{font-size:13px; font-weight:700; letter-spacing:0.3px; margin-bottom:14px; display:flex; align-items:center; justify-content:space-between;}
+  .card-title .hint{font-size:11px; font-weight:500; color:var(--text-faint);}
+
+  /* ---------- Upload zone ---------- */
+  .dropzone{
+    border:1.5px dashed var(--border); border-radius:var(--radius); padding:34px 20px;
+    text-align:center; cursor:pointer; transition:all .15s ease; background:var(--surface-2);
+  }
+  .dropzone:hover{border-color:var(--green); background:var(--surface-3);}
+  .dropzone .icon{font-size:26px; margin-bottom:10px; opacity:0.8;}
+  .dropzone .main{font-size:13.5px; font-weight:600; margin-bottom:4px;}
+  .dropzone .sub{font-size:11.5px; color:var(--text-faint);}
+
+  .bill-preview{
+    display:none; border-radius:var(--radius); overflow:hidden; border:1px solid var(--border);
+    background:var(--surface-2);
+  }
+  .bill-preview.show{display:block;}
+  .bill-preview img{width:100%; display:block; filter:brightness(0.95);}
+  .bill-preview .strip{
+    padding:10px 14px; display:flex; align-items:center; justify-content:space-between;
+    font-size:11.5px; color:var(--text-dim); border-top:1px solid var(--border-soft);
+  }
+  .bill-preview .strip a{color:var(--green); text-decoration:none; font-weight:600;}
+
+  /* ---------- Routing chip (signature element) ---------- */
+  .routing-chip{
+    display:inline-flex; align-items:center; gap:7px; padding:6px 12px 6px 8px; border-radius:999px;
+    font-size:11.5px; font-weight:700; letter-spacing:0.3px; font-family:var(--font-mono);
+  }
+  .routing-chip.haiku{background:var(--haiku-bg); color:var(--haiku); border:1px solid rgba(94,200,216,0.3);}
+  .routing-chip.sonnet{background:var(--sonnet-bg); color:var(--sonnet); border:1px solid rgba(185,140,232,0.3);}
+  .routing-chip .dot{width:6px; height:6px; border-radius:50%; background:currentColor;}
+
+  .processing{
+    display:none; align-items:center; gap:10px; padding:12px 14px; background:var(--surface-2);
+    border:1px solid var(--border-soft); border-radius:8px; font-size:12.5px; color:var(--text-dim); margin-top:12px;
+  }
+  .processing.show{display:flex;}
+  .spinner{
+    width:14px; height:14px; border-radius:50%; border:2px solid var(--border);
+    border-top-color:var(--green); animation:spin .7s linear infinite; flex-shrink:0;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  /* ---------- Fields ---------- */
+  .field-row{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;}
+  .field-row.full{grid-template-columns:1fr;}
+  .field{display:flex; flex-direction:column; gap:6px;}
+  .field label{font-size:11px; font-weight:600; color:var(--text-dim); display:flex; align-items:center; justify-content:space-between;}
+  .field input, .field select, .field textarea{
+    background:var(--surface-2); border:1px solid var(--border); border-radius:7px; color:var(--text);
+    padding:9px 11px; font-family:var(--font-ui); font-size:13px; outline:none; transition:border-color .15s;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus{border-color:var(--green);}
+  .field input.mono{font-family:var(--font-mono);}
+
+  .conf-badge{
+    font-size:9.5px; font-weight:700; letter-spacing:0.4px; padding:2px 7px; border-radius:5px; text-transform:uppercase;
+  }
+  .conf-badge.high{background:var(--green-bg); color:var(--green);}
+  .conf-badge.medium{background:var(--amber-bg); color:var(--amber);}
+  .conf-badge.low{background:var(--red-bg); color:var(--red);}
+
+  /* ---------- Policy checks ---------- */
+  .policy-item{
+    display:flex; align-items:flex-start; gap:10px; padding:10px 0; border-bottom:1px solid var(--border-soft);
+    font-size:12.5px;
+  }
+  .policy-item:last-child{border-bottom:none;}
+  .policy-icon{
+    width:18px; height:18px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:11px; font-weight:800; flex-shrink:0; margin-top:1px;
+  }
+  .policy-icon.pass{background:var(--green-bg); color:var(--green);}
+  .policy-icon.warn{background:var(--amber-bg); color:var(--amber);}
+  .policy-icon.fail{background:var(--red-bg); color:var(--red);}
+  .policy-item .ptext .t1{color:var(--text); font-weight:500;}
+  .policy-item .ptext .t2{color:var(--text-faint); font-size:11.5px; margin-top:2px;}
+
+  /* ---------- Buttons ---------- */
+  .btn{
+    border:none; border-radius:8px; padding:10px 18px; font-family:var(--font-ui); font-size:13px;
+    font-weight:700; cursor:pointer; letter-spacing:0.2px; transition:opacity .15s, transform .1s;
+  }
+  .btn:active{transform:scale(0.98);}
+  .btn-primary{background:var(--green); color:#052113;}
+  .btn-primary:hover{opacity:0.9;}
+  .btn-ghost{background:var(--surface-3); color:var(--text); border:1px solid var(--border);}
+  .btn-ghost:hover{background:var(--surface-2);}
+  .btn-danger{background:var(--red-bg); color:var(--red); border:1px solid rgba(239,90,111,0.3);}
+  .btn-danger:hover{background:rgba(239,90,111,0.18);}
+  .btn-sm{padding:6px 12px; font-size:11.5px;}
+  .btn-row{display:flex; gap:10px; margin-top:16px;}
+  .btn:disabled{opacity:0.4; cursor:not-allowed;}
+
+  /* ---------- Table ---------- */
+  table{width:100%; border-collapse:collapse;}
+  thead th{
+    text-align:left; font-size:10.5px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase;
+    color:var(--text-faint); padding:0 12px 10px; border-bottom:1px solid var(--border);
+  }
+  tbody td{padding:13px 12px; border-bottom:1px solid var(--border-soft); font-size:12.5px; vertical-align:middle;}
+  tbody tr{cursor:pointer; transition:background .1s;}
+  tbody tr:hover{background:var(--surface-2);}
+  tbody tr.selected{background:var(--surface-3);}
+  .amount{font-family:var(--font-mono); font-weight:600;}
+  .status-pill{
+    display:inline-block; font-size:10.5px; font-weight:700; padding:3px 9px; border-radius:6px; letter-spacing:0.2px;
+  }
+  .status-pill.pending{background:var(--amber-bg); color:var(--amber);}
+  .status-pill.approved{background:var(--green-bg); color:var(--green);}
+  .status-pill.rejected{background:var(--red-bg); color:var(--red);}
+  .status-pill.query{background:rgba(94,200,216,0.12); color:var(--haiku);}
+
+  /* ---------- Explainer strip ---------- */
+  .explainer{
+    background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius);
+    padding:14px 18px; margin-bottom:20px; display:flex; align-items:center; gap:14px; cursor:pointer;
+  }
+  .explainer .ico{font-size:16px;}
+  .explainer .txt{font-size:12px; color:var(--text-dim); flex:1;}
+  .explainer .txt b{color:var(--text); font-weight:600;}
+  .explainer .toggle{font-size:11px; color:var(--green); font-weight:700; white-space:nowrap;}
+  .explainer-detail{
+    display:none; background:var(--surface); border:1px solid var(--border-soft); border-top:none;
+    border-radius:0 0 var(--radius) var(--radius); padding:0 18px 18px; margin-top:-20px; margin-bottom:20px;
+    font-size:12px; color:var(--text-dim);
+  }
+  .explainer-detail.show{display:block;}
+  .explainer-detail .row{display:flex; gap:24px; margin-top:12px; flex-wrap:wrap;}
+  .explainer-detail .col{flex:1; min-width:220px;}
+  .explainer-detail .col h4{font-size:11px; color:var(--text); margin-bottom:6px; display:flex; align-items:center; gap:8px;}
+
+  /* ---------- Filters ---------- */
+  .filters{display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; align-items:center;}
+  .filters select, .filters input{
+    background:var(--surface-2); border:1px solid var(--border); border-radius:7px; color:var(--text);
+    padding:8px 11px; font-size:12px; font-family:var(--font-ui); outline:none;
+  }
+  .filters .spacer{flex:1;}
+  .batch-bar{
+    display:none; align-items:center; gap:12px; background:var(--surface-3); border:1px solid var(--border);
+    border-radius:8px; padding:10px 14px; margin-bottom:14px; font-size:12.5px;
+  }
+  .batch-bar.show{display:flex;}
+  .batch-bar b{color:var(--green);}
+
+  /* ---------- Detail panel ---------- */
+  .detail-empty{
+    display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%;
+    min-height:340px; color:var(--text-faint); text-align:center; gap:8px;
+  }
+  .detail-empty .ico{font-size:30px; opacity:0.5;}
+  .reasoning-box{
+    background:var(--surface-2); border:1px solid var(--border-soft); border-radius:8px; padding:12px 14px;
+    font-size:12px; color:var(--text-dim); margin-top:8px; line-height:1.55;
+  }
+  .reasoning-box .label{font-size:10px; font-weight:700; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;}
+
+  .checkbox{width:15px; height:15px; accent-color:var(--green); cursor:pointer;}
+
+  ::-webkit-scrollbar{width:8px; height:8px;}
+  ::-webkit-scrollbar-thumb{background:var(--border); border-radius:4px;}
+
+  .toast{
+    position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px);
+    background:var(--surface-3); border:1px solid var(--green); color:var(--text); padding:12px 20px;
+    border-radius:8px; font-size:13px; font-weight:600; opacity:0; pointer-events:none; transition:all .25s ease;
+    box-shadow:0 8px 30px rgba(0,0,0,0.4); z-index:100;
+  }
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="brand">
+      <div class="brand-mark">SA</div>
+      <div class="brand-text">
+        <div class="name">Smart Agro ERP</div>
+        <div class="sub">REIMBURSEMENTS MODULE · MOCKUP</div>
+      </div>
+    </div>
+    <div class="role-switch">
+      <button class="active" data-role="employee">Employee</button>
+      <button data-role="approver">Approver / Finance</button>
+    </div>
+  </header>
+
+  <div class="explainer" id="explainerToggle">
+    <div class="ico">ⓘ</div>
+    <div class="txt">How AI extraction works in this module — <b>two-tier model routing</b>, confidence bands, and human-in-loop approval.</div>
+    <div class="toggle" id="explainerLabel">Show details ▾</div>
+  </div>
+  <div class="explainer-detail" id="explainerDetail">
+    <div class="row">
+      <div class="col">
+        <h4><span class="routing-chip haiku"><span class="dot"></span>HAIKU 4.5</span></h4>
+        Handles routine, clearly-printed bills — fuel, stationery, standard vendor invoices. Fast and low-cost, used for the majority of submissions.
+      </div>
+      <div class="col">
+        <h4><span class="routing-chip sonnet"><span class="dot"></span>SONNET 5</span></h4>
+        Escalated automatically for handwritten totals, damaged/low-quality scans, multi-item bills, or foreign-currency receipts — anything Haiku flags as low-confidence.
+      </div>
+      <div class="col">
+        <h4>Human-in-loop</h4>
+        Every field stays editable regardless of confidence. Low-confidence fields are flagged, not blocked — the employee or approver confirms before submission/approval. No auto-approval on extracted data alone.
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ EMPLOYEE VIEW ============ -->
+  <div class="view active" id="view-employee">
+    <div class="tabbar">
+      <button class="active" data-etab="submit">Submit Expense</button>
+      <button data-etab="mine">My Submissions</button>
+    </div>
+
+    <div id="etab-submit">
+      <div class="grid2">
+        <div>
+          <div class="card">
+            <div class="card-title">Upload bill<span class="hint">JPG, PNG, PDF · max 10MB</span></div>
+            <div class="dropzone" id="dropzone">
+              <div class="icon">📄</div>
+              <div class="main">Drop bill here or click to upload</div>
+              <div class="sub">Camera capture also supported on mobile</div>
+            </div>
+            <div class="bill-preview" id="billPreview">
+              <img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='500' height='650'><rect width='500' height='650' fill='%23f4f1ea'/><rect x='40' y='40' width='420' height='70' fill='%23ddd8cc'/><text x='60' y='80' font-family='monospace' font-size='22' fill='%23333'>AGRO FUEL STATION</text><rect x='40' y='140' width='420' height='2' fill='%23ccc'/><text x='40' y='180' font-family='monospace' font-size='14' fill='%23555'>Bill No: FS-88214</text><text x='40' y='205' font-family='monospace' font-size='14' fill='%23555'>Date: 18-Aug-2026</text><text x='40' y='230' font-family='monospace' font-size='14' fill='%23555'>GSTIN: 29AACFS1234K1Z8</text><rect x='40' y='270' width='420' height='2' fill='%23ccc'/><text x='40' y='310' font-family='monospace' font-size='14' fill='%23333'>Diesel  180.5 L x Rs 91.20</text><text x='40' y='335' font-family='monospace' font-size='14' fill='%23333'>CGST @ 14%</text><text x='40' y='360' font-family='monospace' font-size='14' fill='%23333'>SGST @ 14%</text><rect x='40' y='400' width='420' height='2' fill='%23ccc'/><text x='40' y='440' font-family='monospace' font-size='18' fill='%23000' font-weight='bold'>TOTAL: Rs 21,177.00</text><text x='40' y='480' font-family='monospace' font-size='12' fill='%23888' font-style='italic'>(handwritten total circled in pen)</text></svg>" alt="Bill preview">
+              <div class="strip"><span id="fileName">fuel_bill_aug18.jpg</span><a href="#" id="removeFile">Remove</a></div>
+            </div>
+            <div class="processing" id="processingBox">
+              <div class="spinner"></div>
+              <span id="processingText">Reading bill with Haiku 4.5…</span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="card" id="extractionCard" style="display:none;">
+            <div class="card-title">
+              Extracted details
+              <span class="routing-chip sonnet" id="routingResult"><span class="dot"></span>SONNET 5</span>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label>Vendor <span class="conf-badge high">High</span></label>
+                <input value="Agro Fuel Station">
+              </div>
+              <div class="field">
+                <label>Bill date <span class="conf-badge high">High</span></label>
+                <input value="18-08-2026">
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label>Amount (₹) <span class="conf-badge low">Low</span></label>
+                <input class="mono" value="21,177.00" style="border-color:var(--red);">
+              </div>
+              <div class="field">
+                <label>GST amount (₹) <span class="conf-badge medium">Medium</span></label>
+                <input class="mono" value="2,935.00">
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label>Category</label>
+                <select>
+                  <option>Fuel &amp; Transport</option>
+                  <option>Site Travel</option>
+                  <option>Farm Operations</option>
+                  <option>Office Supplies</option>
+                  <option>Client Entertainment</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Cost centre</label>
+                <select>
+                  <option>Madaksira — Farm Ops</option>
+                  <option>Bangalore — Sales</option>
+                  <option>Bangalore — Admin</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row full">
+              <div class="field">
+                <label>Note (optional)</label>
+                <textarea rows="2" placeholder="e.g. site visit to Madaksira plots">Diesel for farm equipment — Madaksira site visit, 18 Aug</textarea>
+              </div>
+            </div>
+            <div class="reasoning-box">
+              <div class="label">Why Sonnet 5</div>
+              Escalated from Haiku 4.5: total amount is circled by hand over a partly smudged printed figure. Flagged low-confidence — please confirm the amount against the bill image before submitting.
+            </div>
+          </div>
+
+          <div class="card" id="policyCard" style="display:none;">
+            <div class="card-title">Policy check</div>
+            <div class="policy-item">
+              <div class="policy-icon pass">✓</div>
+              <div class="ptext"><div class="t1">Within monthly fuel allowance</div><div class="t2">₹21,177 of ₹35,000 monthly cap used</div></div>
+            </div>
+            <div class="policy-item">
+              <div class="policy-icon warn">!</div>
+              <div class="ptext"><div class="t1">Amount needs confirmation</div><div class="t2">Low-confidence field — verify against bill before submitting</div></div>
+            </div>
+            <div class="policy-item">
+              <div class="policy-icon pass">✓</div>
+              <div class="ptext"><div class="t1">No duplicate bill detected</div><div class="t2">Checked against last 90 days of submissions</div></div>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-primary" id="submitBtn">Submit for approval</button>
+              <button class="btn btn-ghost">Save as draft</button>
+            </div>
+          </div>
+
+          <div class="card detail-empty" id="emptyState">
+            <div class="ico">🧾</div>
+            <div>Upload a bill to see AI-extracted details here</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="etab-mine" style="display:none;">
+      <div class="card" style="padding:0;">
+        <table>
+          <thead><tr><th>Date</th><th>Vendor</th><th>Category</th><th>Amount</th><th>Model used</th><th>Status</th></tr></thead>
+          <tbody id="myTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ APPROVER VIEW ============ -->
+  <div class="view" id="view-approver">
+    <div class="filters">
+      <select id="filterStatus">
+        <option value="all">All statuses</option>
+        <option value="pending" selected>Pending</option>
+        <option value="approved">Approved</option>
+        <option value="rejected">Rejected</option>
+        <option value="query">Queried</option>
+      </select>
+      <select id="filterConf">
+        <option value="all">All confidence</option>
+        <option value="low">Low confidence only</option>
+        <option value="high">High confidence only</option>
+      </select>
+      <input type="text" placeholder="Search employee or vendor…" id="filterSearch">
+      <div class="spacer"></div>
+      <span style="font-size:12px; color:var(--text-faint);" id="queueCount">6 in queue</span>
+    </div>
+
+    <div class="batch-bar" id="batchBar">
+      <span><b id="batchCount">0</b> selected, all high-confidence &amp; within-policy</span>
+      <button class="btn btn-primary btn-sm" id="batchApprove">Approve selected</button>
+      <button class="btn btn-ghost btn-sm" id="batchClear">Clear</button>
+    </div>
+
+    <div class="grid2">
+      <div class="card" style="padding:0;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:26px;"></th>
+              <th>Employee</th><th>Vendor</th><th>Amount</th><th>Model</th><th>Conf.</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="queueTableBody"></tbody>
+        </table>
+      </div>
+
+      <div class="card" id="detailPanel">
+        <div class="detail-empty">
+          <div class="ico">👉</div>
+          <div>Select a submission from the queue to review</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ---------- Role & tab switching ----------
+document.querySelectorAll('.role-switch button').forEach(b=>{
+  b.addEventListener('click',()=>{
+    document.querySelectorAll('.role-switch button').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    const role = b.dataset.role;
+    document.getElementById('view-employee').classList.toggle('active', role==='employee');
+    document.getElementById('view-approver').classList.toggle('active', role==='approver');
+    if(role==='approver') renderQueue();
+  });
+});
+
+document.querySelectorAll('.tabbar button[data-etab]').forEach(b=>{
+  b.addEventListener('click',()=>{
+    document.querySelectorAll('.tabbar button[data-etab]').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    document.getElementById('etab-submit').style.display = b.dataset.etab==='submit' ? 'block':'none';
+    document.getElementById('etab-mine').style.display = b.dataset.etab==='mine' ? 'block':'none';
+    if(b.dataset.etab==='mine') renderMyTable();
+  });
+});
+
+// ---------- Explainer ----------
+const explainerToggle = document.getElementById('explainerToggle');
+const explainerDetail = document.getElementById('explainerDetail');
+const explainerLabel = document.getElementById('explainerLabel');
+explainerToggle.addEventListener('click',()=>{
+  const showing = explainerDetail.classList.toggle('show');
+  explainerLabel.textContent = showing ? 'Hide details ▴' : 'Show details ▾';
+});
+
+// ---------- Upload simulation ----------
+const dropzone = document.getElementById('dropzone');
+const billPreview = document.getElementById('billPreview');
+const processingBox = document.getElementById('processingBox');
+const processingText = document.getElementById('processingText');
+const extractionCard = document.getElementById('extractionCard');
+const policyCard = document.getElementById('policyCard');
+const emptyState = document.getElementById('emptyState');
+const routingResult = document.getElementById('routingResult');
+
+dropzone.addEventListener('click', simulateUpload);
+document.getElementById('removeFile').addEventListener('click',(e)=>{
+  e.preventDefault();
+  billPreview.classList.remove('show');
+  dropzone.style.display='block';
+  extractionCard.style.display='none';
+  policyCard.style.display='none';
+  emptyState.style.display='flex';
+});
+
+function simulateUpload(){
+  dropzone.style.display='none';
+  billPreview.classList.add('show');
+  emptyState.style.display='none';
+  processingBox.classList.add('show');
+  processingText.textContent = 'Reading bill with Haiku 4.5…';
+
+  setTimeout(()=>{
+    processingText.textContent = 'Low confidence on total — escalating to Sonnet 5…';
+  }, 900);
+
+  setTimeout(()=>{
+    processingBox.classList.remove('show');
+    extractionCard.style.display='block';
+    policyCard.style.display='block';
+  }, 1900);
+}
+
+document.getElementById('submitBtn').addEventListener('click',()=>{
+  showToast('Submitted for approval — you\'ll be notified once reviewed');
+  document.querySelectorAll('.tabbar button[data-etab]')[1].click();
+});
+
+// ---------- My submissions mock data ----------
+const myData = [
+  {date:'18 Aug 2026', vendor:'Agro Fuel Station', cat:'Fuel & Transport', amount:'21,177', model:'sonnet', status:'pending'},
+  {date:'14 Aug 2026', vendor:'Sri Ganesh Stationers', cat:'Office Supplies', amount:'1,240', model:'haiku', status:'approved'},
+  {date:'09 Aug 2026', vendor:'Hotel Mayura', cat:'Site Travel', amount:'3,600', model:'haiku', status:'approved'},
+  {date:'02 Aug 2026', vendor:'Madaksira Hardware', cat:'Farm Operations', amount:'8,950', model:'sonnet', status:'query'},
+  {date:'27 Jul 2026', vendor:'Café Coffee Day', cat:'Client Entertainment', amount:'980', model:'haiku', status:'rejected'},
+];
+function renderMyTable(){
+  const body = document.getElementById('myTableBody');
+  body.innerHTML = myData.map(r=>`
+    <tr>
+      <td>${r.date}</td>
+      <td>${r.vendor}</td>
+      <td>${r.cat}</td>
+      <td class="amount">₹${r.amount}</td>
+      <td><span class="routing-chip ${r.model}" style="font-size:10px; padding:3px 9px 3px 6px;"><span class="dot"></span>${r.model==='haiku'?'HAIKU 4.5':'SONNET 5'}</span></td>
+      <td><span class="status-pill ${r.status}">${r.status[0].toUpperCase()+r.status.slice(1)}</span></td>
+    </tr>`).join('');
+}
+
+// ---------- Approver queue mock data ----------
+const queueData = [
+  {id:1, emp:'Thimmaraju Boya', vendor:'Agro Fuel Station', amount:'21,177', model:'sonnet', conf:'low', status:'pending', cat:'Fuel & Transport', cc:'Madaksira — Farm Ops', date:'18 Aug 2026',
+    note:'Diesel for farm equipment — Madaksira site visit, 18 Aug', policyFlags:[{t:'pass',t1:'Within monthly fuel allowance',t2:'₹21,177 of ₹35,000 monthly cap used'},{t:'warn',t1:'Low-confidence amount',t2:'Handwritten total over printed figure — verify against bill'}],
+    reasoning:'Escalated from Haiku 4.5: total amount is circled by hand over a partly smudged printed figure.'},
+  {id:2, emp:'Vinay Chikkaiah Sai', vendor:'Hotel Mayura', amount:'3,600', model:'haiku', conf:'high', status:'pending', cat:'Site Travel', cc:'Bangalore — Sales', date:'17 Aug 2026',
+    note:'Overnight stay — client site visit, Anantapur', policyFlags:[{t:'pass',t1:'Within site-travel per-diem',t2:'₹3,600 of ₹4,500 daily cap'},{t:'pass',t1:'No duplicate bill detected',t2:'Checked against last 90 days'}],
+    reasoning:'Clean printed invoice, all fields extracted with high confidence on first pass.'},
+  {id:3, emp:'Priya Shankar', vendor:'Madaksira Hardware', amount:'8,950', model:'sonnet', conf:'medium', status:'pending', cat:'Farm Operations', cc:'Madaksira — Farm Ops', date:'16 Aug 2026',
+    note:'Fencing material for boundary repair', policyFlags:[{t:'warn',t1:'Missing GSTIN on bill',t2:'Vendor bill does not show a GST number'},{t:'pass',t1:'Within department budget',t2:'₹8,950 of ₹50,000 monthly Farm Ops budget'}],
+    reasoning:'Multi-item bill with 6 line items; itemised total matched grand total within ₹2 rounding.'},
+  {id:4, emp:'Kiran Kumar R', vendor:'Café Coffee Day', amount:'980', model:'haiku', conf:'high', status:'query', cat:'Client Entertainment', cc:'Bangalore — Admin', date:'15 Aug 2026',
+    note:'Meeting with prospective land partner', policyFlags:[{t:'fail',t1:'No attendee names listed',t2:'Client entertainment over ₹500 requires attendee names per policy'}],
+    reasoning:'High-confidence extraction; flagged by policy engine, not by AI, for missing attendee detail.'},
+  {id:5, emp:'Sivakumar C', vendor:'Reliance Digital', amount:'14,200', model:'sonnet', conf:'low', status:'pending', cat:'Office Supplies', cc:'Bangalore — Admin', date:'14 Aug 2026',
+    note:'Replacement monitor for IT desk', policyFlags:[{t:'warn',t1:'Above single-item threshold',t2:'IT hardware over ₹10,000 requires asset-tag registration'}],
+    reasoning:'Faded thermal-print receipt; amount and GST both below Haiku confidence threshold, re-read by Sonnet 5.'},
+  {id:6, emp:'Thimmaraju Boya', vendor:'Sri Ganesh Stationers', amount:'1,240', model:'haiku', conf:'high', status:'approved', cat:'Office Supplies', cc:'Madaksira — Farm Ops', date:'12 Aug 2026',
+    note:'Registers and stationery for farm office', policyFlags:[{t:'pass',t1:'Within office supplies budget',t2:'Routine, pre-approved category'}],
+    reasoning:'Clean printed invoice, routine category, auto-cleared policy checks.'},
+];
+
+let selectedIds = new Set();
+let activeDetailId = null;
+
+function filteredQueue(){
+  const status = document.getElementById('filterStatus').value;
+  const conf = document.getElementById('filterConf').value;
+  const search = document.getElementById('filterSearch').value.toLowerCase();
+  return queueData.filter(r=>{
+    if(status!=='all' && r.status!==status) return false;
+    if(conf!=='all' && r.conf!==conf) return false;
+    if(search && !(r.emp.toLowerCase().includes(search) || r.vendor.toLowerCase().includes(search))) return false;
+    return true;
+  });
+}
+
+function renderQueue(){
+  const rows = filteredQueue();
+  document.getElementById('queueCount').textContent = rows.length + ' in queue';
+  const body = document.getElementById('queueTableBody');
+  body.innerHTML = rows.map(r=>`
+    <tr class="${activeDetailId===r.id?'selected':''}" data-id="${r.id}">
+      <td onclick="event.stopPropagation()"><input type="checkbox" class="checkbox" data-check="${r.id}" ${selectedIds.has(r.id)?'checked':''} ${r.conf!=='high'||r.status!=='pending'?'disabled style=opacity:0.25':''}></td>
+      <td>${r.emp}</td>
+      <td>${r.vendor}</td>
+      <td class="amount">₹${r.amount}</td>
+      <td><span class="routing-chip ${r.model}" style="font-size:9.5px; padding:2px 8px 2px 6px;"><span class="dot"></span>${r.model==='haiku'?'HAIKU':'SONNET'}</span></td>
+      <td><span class="conf-badge ${r.conf}">${r.conf}</span></td>
+      <td><span class="status-pill ${r.status}">${r.status[0].toUpperCase()+r.status.slice(1)}</span></td>
+    </tr>`).join('');
+
+  body.querySelectorAll('tr').forEach(tr=>{
+    tr.addEventListener('click',()=>{ activeDetailId = parseInt(tr.dataset.id); renderQueue(); renderDetail(); });
+  });
+  body.querySelectorAll('input[data-check]').forEach(cb=>{
+    cb.addEventListener('change',()=>{
+      const id = parseInt(cb.dataset.check);
+      if(cb.checked) selectedIds.add(id); else selectedIds.delete(id);
+      renderBatchBar();
+    });
+  });
+  renderBatchBar();
+}
+
+function renderBatchBar(){
+  const bar = document.getElementById('batchBar');
+  document.getElementById('batchCount').textContent = selectedIds.size;
+  bar.classList.toggle('show', selectedIds.size>0);
+}
+
+document.getElementById('batchClear').addEventListener('click',()=>{ selectedIds.clear(); renderQueue(); });
+document.getElementById('batchApprove').addEventListener('click',()=>{
+  selectedIds.forEach(id=>{
+    const rec = queueData.find(r=>r.id===id);
+    if(rec) rec.status='approved';
+  });
+  showToast(selectedIds.size + ' submission(s) approved');
+  selectedIds.clear();
+  renderQueue();
+  if(activeDetailId) renderDetail();
+});
+
+['filterStatus','filterConf','filterSearch'].forEach(id=>{
+  document.getElementById(id).addEventListener('input', renderQueue);
+});
+
+function renderDetail(){
+  const panel = document.getElementById('detailPanel');
+  const r = queueData.find(x=>x.id===activeDetailId);
+  if(!r){ panel.innerHTML = `<div class="detail-empty"><div class="ico">👉</div><div>Select a submission from the queue to review</div></div>`; return; }
+
+  panel.innerHTML = `
+    <div class="card-title">
+      ${r.emp}
+      <span class="routing-chip ${r.model}"><span class="dot"></span>${r.model==='haiku'?'HAIKU 4.5':'SONNET 5'}</span>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Vendor</label><input value="${r.vendor}"></div>
+      <div class="field"><label>Bill date</label><input value="${r.date}"></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Amount (₹) <span class="conf-badge ${r.conf}">${r.conf}</span></label><input class="mono" value="${r.amount}.00"></div>
+      <div class="field"><label>Category</label><input value="${r.cat}"></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Cost centre</label><input value="${r.cc}"></div>
+      <div class="field"><label>Status</label><input value="${r.status[0].toUpperCase()+r.status.slice(1)}" disabled></div>
+    </div>
+    <div class="field-row full"><div class="field"><label>Note</label><textarea rows="2">${r.note}</textarea></div></div>
+    <div class="reasoning-box"><div class="label">AI reasoning</div>${r.reasoning}</div>
+    <div class="card-title" style="margin-top:16px;">Policy checks</div>
+    ${r.policyFlags.map(f=>`
+      <div class="policy-item">
+        <div class="policy-icon ${f.t}">${f.t==='pass'?'✓':f.t==='warn'?'!':'✕'}</div>
+        <div class="ptext"><div class="t1">${f.t1}</div><div class="t2">${f.t2}</div></div>
+      </div>`).join('')}
+    <div class="field-row full" style="margin-top:14px;"><div class="field"><label>Comment (optional)</label><textarea rows="2" placeholder="Add a note for the employee…"></textarea></div></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="actOn(${r.id},'approved')" ${r.status!=='pending'?'disabled':''}>Approve</button>
+      <button class="btn btn-ghost" onclick="actOn(${r.id},'query')" ${r.status!=='pending'?'disabled':''}>Query</button>
+      <button class="btn btn-danger" onclick="actOn(${r.id},'rejected')" ${r.status!=='pending'?'disabled':''}>Reject</button>
+    </div>`;
+}
+
+function actOn(id, newStatus){
+  const rec = queueData.find(r=>r.id===id);
+  if(rec) rec.status = newStatus;
+  const verb = newStatus==='approved'?'Approved':newStatus==='rejected'?'Rejected':'Sent back for query';
+  showToast(verb + ' — ' + rec.emp + '\'s submission');
+  renderQueue();
+  renderDetail();
+}
+
+function showToast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2600);
+}
+
+renderQueue();
+</script>
+</body>
+</html>
