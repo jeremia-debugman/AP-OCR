@@ -1,0 +1,614 @@
+// ============================================================================
+// PKC Management Consulting — Module 1: Ledger Mapping Engine
+// ============================================================================
+
+const APP_CONFIG = {
+  COMPANY_NAME: 'PKC Management Consulting',
+  VOUCHER_TYPE: 'Purchase',
+  TAX_LEDGERS: { CGST: 'Input CGST', SGST: 'Input SGST', IGST: 'Input IGST', CESS: 'Input Cess' },
+  DEFAULT_ROUNDOFF_LEDGER: 'Round Off A/c',
+  DEFAULT_PURCHASE_HEAD: 'Purchase Account'
+};
+
+const RESERVED_WORDS = new Set(['pending', 'approved', 'rejected', 'incomplete', 'mapped']);
+function isReservedWord(val) {
+  return RESERVED_WORDS.has(String(val || '').trim().toLowerCase());
+}
+
+const LOCKED_CELL_BG = '#d9d9d9';
+
+// ---------- MENU & TRIGGERS ----------
+
+function onEdit(e) {
+  if (!e || !e.range) return;
+  const range = e.range, sheet = range.getSheet(), row = range.getRow(), col = range.getColumn();
+  const sheetName = sheet.getName();
+
+  // ====================================================
+  // ROUTE 1: LEDGER MAPPING SCREEN LOGIC
+  // ====================================================
+  if (sheetName === 'Ledger Mapping' && row >= 5) {
+    const bg = range.getBackground().toLowerCase();
+
+    // If the cell is an exact-match locked cell, revert edits
+    if (bg === LOCKED_CELL_BG) {
+      if (e.oldValue !== undefined) {
+        range.setValue(e.oldValue);
+      } else {
+        const masterSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Tally Master');
+        const masterDict = loadTallyMasterDictionary(masterSheet);
+        let correctValue = '';
+
+        if (col === 6) {
+          const rawVendor = String(sheet.getRange(row, 5).getValue()).trim().toLowerCase();
+          correctValue = masterDict.exactVendors.get(rawVendor) || '';
+        } else if (col === 9) {
+          const rawDesc = String(sheet.getRange(row, 7).getValue()).trim().toLowerCase();
+          const lineType = String(sheet.getRange(row, 8).getValue()).trim();
+          if (lineType === 'Stock Item') {
+            const m = masterDict.exactItems.get(rawDesc);
+            correctValue = m ? m.stockItem : '';
+          } else {
+            const m = masterDict.exactExpenses.get(rawDesc);
+            correctValue = m ? m.expenseHead : '';
+          }
+        }
+        if (correctValue) range.setValue(correctValue);
+      }
+
+      range.setBackground(LOCKED_CELL_BG);
+      SpreadsheetApp.getActiveSpreadsheet().toast(
+        'This field is verified and locked against edits.',
+        'Protected Field',
+        3
+      );
+      return;
+    }
+
+    // Clear background back to white only on editable staging cells
+    if ((col === 6 || col === 9) && bg !== LOCKED_CELL_BG) {
+      range.setBackground('#FFFFFF');
+    }
+    return;
+  }
+
+  // ====================================================
+  // ROUTE 2: EXCEL EXPORT FORMAT (DYNAMIC DROPDOWN)
+  // ====================================================
+  if (sheetName === 'Excel Export Format') {
+    // Trigger if edit happened in C9, D10, D11, or D12
+    if ((col === 3 && row === 9) || (col === 4 && (row >= 10 && row <= 12))) {
+      updateSupplierDropdown(e.source);
+    }
+    return;
+  }
+}
+
+// ---------- LEDGER MAPPING SCREEN LOGIC ----------
+
+function loadUnmappedToMappingScreen() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ss.toast('Scanning pending database records...', 'Processing', 4);
+
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  const itemSheet = ss.getSheetByName('Item-wise Database');
+  const masterSheet = ss.getSheetByName('Tally Master');
+  const mapSheet = ss.getSheetByName('Ledger Mapping');
+
+  if (!invSheet || !itemSheet || !masterSheet || !mapSheet) {
+    SpreadsheetApp.getUi().alert('Error: Missing required sheet(s). Check tab names.');
+    return;
+  }
+
+  // Ensure header row (Row 3, Cols D to K)
+  mapSheet.getRange(3, 4, 1, 8).setValues([[
+    'Invoice Number', 'Vendor Name (OCR)', 'Tally Supplier Ledger',
+    'Item Description (OCR)', 'Line Type', 'Mapped Tally Stock Item',
+    'Invoice Row ID', 'Item Row ID'
+  ]]);
+  mapSheet.getRange(3, 12).clearContent();
+
+  const masterDict = loadTallyMasterDictionary(masterSheet);
+  const invData = invSheet.getDataRange().getValues();
+  const itemData = itemSheet.getDataRange().getValues();
+  let invDbModified = false, itemDbModified = false;
+
+  // 1. Scan Invoice-wise Database: Only process when Col T (index 19) is 'pending'
+  const pendingInvoices = new Map();
+
+  for (let i = 1; i < invData.length; i++) {
+    const invNo = String(invData[i][5] || '').trim();
+    const rawVendor = String(invData[i][2] || '').trim();
+    let supplierLedger = String(invData[i][18] || '').trim(); 
+    if (isReservedWord(supplierLedger)) supplierLedger = '';
+    const status = String(invData[i][19] || '').trim().toLowerCase(); 
+
+    if (!invNo || status !== 'pending') continue;
+
+    if (!supplierLedger && masterDict.exactVendors.has(rawVendor.toLowerCase())) {
+      supplierLedger = masterDict.exactVendors.get(rawVendor.toLowerCase());
+      invData[i][18] = supplierLedger; 
+      invDbModified = true;
+    }
+
+    pendingInvoices.set(invNo, { rowIdx: i + 1, vendor: rawVendor, supplierLedger: supplierLedger });
+  }
+
+  // 2. Scan Item-wise Database: Only process when Col U (index 20) is 'pending'
+  for (let j = 1; j < itemData.length; j++) {
+    const invNo = String(itemData[j][1] || '').trim();
+    const invInfo = pendingInvoices.get(invNo);
+    if (!invInfo) continue;
+
+    const itemStatus = String(itemData[j][20] || '').trim().toLowerCase(); 
+    if (itemStatus !== 'pending') continue;
+
+    const rawDesc = String(itemData[j][5] || '').trim();
+    const descKey = rawDesc.toLowerCase();
+    const hsnSac = String(itemData[j][6] || '').trim();
+    let lineType = String(itemData[j][4] || '').trim();
+    let supplierLedger = String(itemData[j][18] || '').trim() || invInfo.supplierLedger; 
+    if (isReservedWord(supplierLedger)) supplierLedger = '';
+    let mappedItem = String(itemData[j][19] || '').trim(); 
+    if (isReservedWord(mappedItem)) mappedItem = '';
+
+    if (!lineType) lineType = /^99/i.test(hsnSac) ? 'Ledger / Expense' : 'Stock Item';
+
+    if (lineType === 'Stock Item' && masterDict.exactItems.has(descKey) && !mappedItem) {
+      mappedItem = masterDict.exactItems.get(descKey).stockItem;
+      itemData[j][4] = lineType;
+      itemData[j][18] = supplierLedger; 
+      itemData[j][19] = mappedItem; 
+      itemDbModified = true;
+    } else if (lineType !== 'Stock Item' && masterDict.exactExpenses.has(descKey) && !mappedItem) {
+      // FIXED: Changed from strict 'Ledger / Expense' to any non-Stock Item (Discount, Additional Charge)
+      mappedItem = masterDict.exactExpenses.get(descKey).expenseHead;
+      itemData[j][4] = lineType;
+      itemData[j][18] = supplierLedger; 
+      itemData[j][19] = mappedItem; 
+      itemDbModified = true;
+    } else if (supplierLedger && itemData[j][18] !== supplierLedger) {
+      itemData[j][18] = supplierLedger; 
+      itemDbModified = true;
+    }
+  }
+
+  if (invDbModified) invSheet.getRange(1, 1, invData.length, invData[0].length).setValues(invData);
+  if (itemDbModified) itemSheet.getRange(1, 1, itemData.length, itemData[0].length).setValues(itemData);
+
+  // 3. Stage to Ledger Mapping Screen
+  const rowsDI = [], rowsJK = [], validationRulesMatrix = [], backgroundMatrix = [];
+  const lineTypeRule = SpreadsheetApp.newDataValidation().requireValueInList(['Stock Item', 'Ledger / Expense', 'Service', 'Discount', 'Additional Charge', 'Round Off'], true).setAllowInvalid(false).build();
+
+  for (let j = 1; j < itemData.length; j++) {
+    const invNo = String(itemData[j][1] || '').trim();
+    const invInfo = pendingInvoices.get(invNo);
+    if (!invInfo) continue;
+
+    const itemStatus = String(itemData[j][20] || '').trim().toLowerCase(); 
+    if (itemStatus !== 'pending') continue;
+
+    const rawDesc = String(itemData[j][5] || '').trim();
+    const descKey = rawDesc.toLowerCase();
+    const hsnSac = String(itemData[j][6] || '').trim();
+    let lineType = String(itemData[j][4] || '').trim();
+    let supplierLedger = String(itemData[j][18] || '').trim() || invInfo.supplierLedger; 
+    if (isReservedWord(supplierLedger)) supplierLedger = '';
+    let mappedItem = String(itemData[j][19] || '').trim(); 
+    if (isReservedWord(mappedItem)) mappedItem = '';
+
+    if (!lineType) lineType = /^99/i.test(hsnSac) ? 'Ledger / Expense' : 'Stock Item';
+
+    // Condition: Check if both Col S and Col T are filled
+    const isFilled = (supplierLedger !== '') && (mappedItem !== '');
+    if (isFilled) continue; // Skip completely
+
+    const isVendorExact = !!(invInfo.vendor && masterDict.exactVendors.has(invInfo.vendor.toLowerCase()));
+    const isItemExact = lineType === 'Stock Item' ? !!(rawDesc && masterDict.exactItems.has(descKey)) : !!(rawDesc && masterDict.exactExpenses.has(descKey));
+    const isVendorLocked = supplierLedger !== '' || isVendorExact;
+    const isItemLocked = mappedItem !== '' || isItemExact;
+
+    // Use null to cleanly reset to default white without hex code errors
+    let vendorBg = isVendorLocked ? LOCKED_CELL_BG : null;
+    let itemBg = isItemLocked ? LOCKED_CELL_BG : null;
+
+    let vendorDropdownList = [], itemDropdownList = [];
+    if (!isVendorLocked && invInfo.vendor) vendorDropdownList = getFastFuzzyMatches(invInfo.vendor, masterDict.preppedVendors, 0.40, 5, true);
+    
+    const cleanedDesc = cleanItemDescription(rawDesc);
+    if (!isItemLocked && rawDesc) {
+      itemDropdownList = lineType === 'Stock Item' ? getFastFuzzyMatches(rawDesc, masterDict.preppedStockItems, 0.35, 5, false) : getFastFuzzyMatches(cleanedDesc, masterDict.preppedExpenseHeads, 0.30, 5, false);
+    }
+
+    rowsDI.push([invNo, invInfo.vendor, supplierLedger, rawDesc, lineType, mappedItem]);
+    rowsJK.push([invInfo.rowIdx, j + 1]);
+
+    const rowRules = new Array(6).fill(null);
+    if (!isVendorLocked && vendorDropdownList.length > 0) rowRules[2] = SpreadsheetApp.newDataValidation().requireValueInList(vendorDropdownList, true).setAllowInvalid(true).build();
+    rowRules[4] = lineTypeRule;
+    if (!isItemLocked && itemDropdownList.length > 0) rowRules[5] = SpreadsheetApp.newDataValidation().requireValueInList(itemDropdownList, true).setAllowInvalid(true).build();
+    
+    validationRulesMatrix.push(rowRules);
+    // Hardcode read-only columns (D, E, G) to Grey, dynamic inputs (F, I) to dynamic, H to clear.
+    backgroundMatrix.push([LOCKED_CELL_BG, LOCKED_CELL_BG, null, LOCKED_CELL_BG, null, itemBg]);
+  }
+
+  // 4. Safely Clear and Repaint all previous records down to bottom of sheet
+  const maxRows = mapSheet.getMaxRows();
+  if (maxRows >= 5) {
+    const clearRange = mapSheet.getRange(5, 2, maxRows - 4, 10);
+    clearRange.clearContent();
+    clearRange.setBackground(null); // Reset entirely
+    
+    // ONLY clear data validations for Columns D through I so Column B is untouched!
+    mapSheet.getRange(5, 4, maxRows - 4, 6).clearDataValidations(); 
+    
+    // Repaint the read-only columns to grey all the way down
+    mapSheet.getRange(5, 3, maxRows - 4, 1).setBackground(LOCKED_CELL_BG); // Col C (S.No.)
+    mapSheet.getRange(5, 4, maxRows - 4, 2).setBackground(LOCKED_CELL_BG); // Cols D & E
+    mapSheet.getRange(5, 7, maxRows - 4, 1).setBackground(LOCKED_CELL_BG); // Col G
+    mapSheet.getRange(5, 10, maxRows - 4, 2).setBackground(LOCKED_CELL_BG); // Cols J & K
+  }
+
+  // 5. Output unmapped rows
+  if (rowsDI.length > 0) {
+    const numRows = rowsDI.length;
+    mapSheet.getRange(5, 4, numRows, 6).setValues(rowsDI);
+    mapSheet.getRange(5, 10, numRows, 2).setValues(rowsJK);
+    mapSheet.getRange(5, 4, numRows, 6).setDataValidations(validationRulesMatrix);
+    mapSheet.getRange(5, 4, numRows, 6).setBackgrounds(backgroundMatrix);
+
+    const statusFormulas = [], snoValues = [];
+    for (let r = 0; r < numRows; r++) {
+      const rowNum = 5 + r;
+      statusFormulas.push([`=IF(AND(F${rowNum}<>"", I${rowNum}<>""), "Mapped", "Incomplete")`]);
+      snoValues.push([r + 1]);
+    }
+    mapSheet.getRange(5, 2, numRows, 1).setFormulas(statusFormulas);
+    mapSheet.getRange(5, 3, numRows, 1).setValues(snoValues);
+
+    ss.toast(`Staged ${numRows} unmapped item(s). Grey cells are verified.`, 'Ready', 4);
+  } else {
+    ss.toast('All pending items are 100% mapped!', 'Up to Date', 3);
+  }
+  syncPendingToApprovalScreen();
+}
+
+function updateMappedToDatabase() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const mapSheet = ss.getSheetByName('Ledger Mapping');
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  const itemSheet = ss.getSheetByName('Item-wise Database');
+  const masterSheet = ss.getSheetByName('Tally Master');
+
+  const lastRow = mapSheet.getLastRow();
+  if (lastRow < 5) {
+    SpreadsheetApp.getUi().alert('No data on Ledger Mapping screen.');
+    return;
+  }
+
+  ss.toast('Validating invoice completeness...', 'Checking', 2);
+  const mapData = mapSheet.getRange(5, 2, lastRow - 4, 10).getValues();
+  const invData = invSheet.getDataRange().getValues();
+  const itemDbData = itemSheet.getDataRange().getValues();
+
+  // Validate which invoices are 100% mapped
+  const invoiceValidation = new Map();
+  mapData.forEach(row => {
+    const invNo = String(row[2] || '').trim();
+    if (!invNo) return;
+    const isRowMapped = String(row[0] || '').trim() === 'Mapped';
+    if (!invoiceValidation.has(invNo)) {
+      invoiceValidation.set(invNo, true);
+    }
+    if (!isRowMapped) {
+      invoiceValidation.set(invNo, false);
+    }
+  });
+
+  const knownVendors = new Set(), knownItems = new Set(), knownExpenses = new Set();
+  if (masterSheet.getLastRow() >= 5) {
+    masterSheet.getRange(5, 1, masterSheet.getLastRow() - 4, 8).getValues().forEach(r => {
+      if (r[1]) knownVendors.add(String(r[1]).trim().toLowerCase());
+      if (r[4]) knownItems.add(String(r[4]).trim().toLowerCase());
+      if (r[7]) knownExpenses.add(String(r[7]).trim().toLowerCase());
+    });
+  }
+
+  const newMasterVendors = [], newMasterItems = [], newMasterExpenses = [];
+  let updatedCount = 0;
+  let incompleteCount = 0;
+
+  for (let i = 0; i < mapData.length; i++) {
+    const row = mapData[i];
+    const status = String(row[0] || '').trim();
+    const invNo = String(row[2] || '').trim();
+    const rawVendor = String(row[3] || '').trim();
+    const supplierLedger = String(row[4] || '').trim();
+    const rawDesc = String(row[5] || '').trim();
+    const lineType = String(row[6] || '').trim() || 'Stock Item';
+    const mappedStockOrExpense = String(row[7] || '').trim();
+    const invRowIdx = parseInt(row[8], 10);
+    const itemRowIdx = parseInt(row[9], 10);
+
+    if (status !== 'Mapped' || isReservedWord(supplierLedger) || isReservedWord(mappedStockOrExpense)) continue;
+
+    let targetItemRow = itemRowIdx;
+    const isPointerValid = targetItemRow <= itemDbData.length && String(itemDbData[targetItemRow - 1][1] || '').trim() === invNo;
+    
+    if (!isPointerValid) {
+      targetItemRow = 0;
+      for (let k = 1; k < itemDbData.length; k++) {
+        if (String(itemDbData[k][1] || '').trim() === invNo && String(itemDbData[k][5] || '').trim() === rawDesc) {
+          targetItemRow = k + 1; break;
+        }
+      }
+    }
+
+    if (targetItemRow === 0) continue;
+
+    itemDbData[targetItemRow - 1][4] = lineType;
+    itemDbData[targetItemRow - 1][18] = supplierLedger; 
+    itemDbData[targetItemRow - 1][19] = mappedStockOrExpense; 
+
+    if (invRowIdx && invRowIdx <= invData.length) invData[invRowIdx - 1][18] = supplierLedger;
+
+    if (rawVendor && supplierLedger && !knownVendors.has(rawVendor.toLowerCase())) {
+      newMasterVendors.push([supplierLedger, rawVendor]);
+      knownVendors.add(rawVendor.toLowerCase());
+    }
+
+    if (lineType === 'Stock Item') {
+      if (rawDesc && mappedStockOrExpense && !knownItems.has(rawDesc.toLowerCase())) {
+        newMasterItems.push([mappedStockOrExpense, rawDesc]);
+        knownItems.add(rawDesc.toLowerCase());
+      }
+    } else {
+      if (rawDesc && mappedStockOrExpense && !knownExpenses.has(rawDesc.toLowerCase())) {
+        newMasterExpenses.push([mappedStockOrExpense, rawDesc]);
+        knownExpenses.add(rawDesc.toLowerCase());
+      }
+    }
+    updatedCount++;
+  }
+
+  if (updatedCount === 0) {
+    SpreadsheetApp.getUi().alert('No completed rows found to save. Please map at least one line item fully.');
+    return;
+  }
+  
+  itemSheet.getRange(1, 1, itemDbData.length, itemDbData[0].length).setValues(itemDbData);
+  invSheet.getRange(1, 1, invData.length, invData[0].length).setValues(invData);
+
+  if (newMasterVendors.length > 0) masterSheet.getRange(getNextEmptyRow(masterSheet, 1, 5), 1, newMasterVendors.length, 2).setValues(newMasterVendors);
+  if (newMasterItems.length > 0) masterSheet.getRange(getNextEmptyRow(masterSheet, 4, 5), 4, newMasterItems.length, 2).setValues(newMasterItems);
+  if (newMasterExpenses.length > 0) masterSheet.getRange(getNextEmptyRow(masterSheet, 7, 5), 7, newMasterExpenses.length, 2).setValues(newMasterExpenses);
+
+  ss.toast(`Saved ${updatedCount} complete mapping(s) to Database!`, 'Success', 3);
+  loadUnmappedToMappingScreen();
+}
+
+// ---------- MASTER DICTIONARY & FUZZY LOGIC ----------
+
+function loadTallyMasterDictionary(masterSheet) {
+  const dict = {
+    exactVendors: new Map(),
+    exactItems: new Map(),
+    exactExpenses: new Map(),
+    allVendors: [],
+    allStockItems: [],
+    allExpenseNames: [],
+    preppedVendors: [],
+    preppedStockItems: [],
+    preppedExpenseHeads: []
+  };
+  if (!masterSheet || masterSheet.getLastRow() < 5) return dict;
+
+  const numRows = masterSheet.getLastRow() - 4;
+  const data = masterSheet.getRange(5, 1, numRows, 8).getValues();
+
+  const uniqueVendors = new Set();
+  const uniqueStockItems = new Set();
+  const uniqueExpenseHeads = new Set([
+    'Freight Inward A/c',
+    'Loading & Hamali A/c',
+    'Round Off A/c',
+    'Discounts Received'
+  ]);
+
+  for (let i = 0; i < data.length; i++) {
+    const tallyVendor = String(data[i][0] || '').trim();
+    const rawVendor = String(data[i][1] || '').trim().toLowerCase();
+    if (tallyVendor && !isReservedWord(tallyVendor)) {
+      uniqueVendors.add(tallyVendor);
+      if (rawVendor) dict.exactVendors.set(rawVendor, tallyVendor);
+    }
+
+    const tallyItem = String(data[i][3] || '').trim();
+    const rawItem = String(data[i][4] || '').trim().toLowerCase();
+    if (tallyItem && !isReservedWord(tallyItem)) {
+      uniqueStockItems.add(tallyItem);
+      if (rawItem) dict.exactItems.set(rawItem, { lineType: 'Stock Item', stockItem: tallyItem });
+    }
+
+    const tallyExpense = String(data[i][6] || '').trim();
+    const rawExpense = String(data[i][7] || '').trim().toLowerCase();
+    if (tallyExpense && !isReservedWord(tallyExpense)) {
+      uniqueExpenseHeads.add(tallyExpense);
+      if (rawExpense) dict.exactExpenses.set(rawExpense, { lineType: 'Ledger / Expense', expenseHead: tallyExpense });
+    }
+  }
+
+  dict.allVendors = [...uniqueVendors].sort();
+  dict.allStockItems = [...uniqueStockItems].sort();
+  dict.allExpenseNames = [...uniqueExpenseHeads].sort();
+
+  dict.preppedVendors = prepMasterList(dict.allVendors, true);
+  dict.preppedStockItems = prepMasterList(dict.allStockItems, false);
+  dict.preppedExpenseHeads = prepMasterList(dict.allExpenseNames, false);
+
+  return dict;
+}
+
+function prepMasterList(candidateList, isVendor = false) {
+  return candidateList.filter(Boolean).map(cand => {
+    const rawClean = String(cand).toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
+    const coreClean = isVendor ? cleanCorporateName(cand) : rawClean;
+    return {
+      name: cand,
+      clean: coreClean || rawClean,
+      words: (coreClean || rawClean).split(/\s+/).filter(Boolean),
+      bigrams: getBigrams(coreClean || rawClean)
+    };
+  });
+}
+
+function getFastFuzzyMatches(queryStr, preppedMaster, threshold, limit, isVendor = false) {
+  const rawQ = String(queryStr).toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
+  const cleanQ = isVendor ? (cleanCorporateName(queryStr) || rawQ) : rawQ;
+  const qWords = cleanQ.split(/\s+/).filter(Boolean);
+  const qBigrams = getBigrams(cleanQ);
+  const results = [];
+
+  for (let i = 0; i < preppedMaster.length; i++) {
+    const item = preppedMaster[i];
+    if (cleanQ === item.clean) {
+      results.push({ name: item.name, score: 1.0 });
+      continue;
+    }
+
+    let matchedWords = 0;
+    for (let w of qWords) {
+      if (item.words.includes(w)) matchedWords++;
+    }
+    const tokenScore = (qWords.length + item.words.length > 0)
+      ? (2 * matchedWords) / (qWords.length + item.words.length)
+      : 0;
+
+    let intersect = 0;
+    for (let b of qBigrams) {
+      if (item.bigrams.has(b)) intersect++;
+    }
+    const bigramScore = (qBigrams.size + item.bigrams.size > 0)
+      ? (2 * intersect) / (qBigrams.size + item.bigrams.size)
+      : 0;
+
+    const score = Math.max(tokenScore, bigramScore);
+    if (score >= threshold) {
+      results.push({ name: item.name, score: score });
+    }
+  }
+
+  results.sort((a, b) => b.score - a.score);
+  return results.slice(0, limit).map(r => r.name);
+}
+
+function getBigrams(s) {
+  const bg = new Set();
+  for (let i = 0; i < s.length - 1; i++) bg.add(s.substring(i, i + 2));
+  return bg;
+}
+
+function cleanCorporateName(str) {
+  return String(str || '')
+    .toLowerCase()
+    .replace(/\b(private|pvt|limited|ltd|enterprises|enterprise|traders|trading|corporation|corp|inc|llp|co|company|services|agency|agencies)\b/gi, ' ')
+    .replace(/[^a-z0-9]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cleanItemDescription(text) {
+  return String(text || '')
+    .replace(/\b(inter\s*state|intra\s*state|sales|input|output|igst|cgst|sgst|cess|\d+%\s*)\b/gi, ' ')
+    .replace(/[^a-zA-Z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getNextEmptyRow(sheet, colIndex, startRow) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return startRow;
+  const values = sheet.getRange(startRow, colIndex, lastRow - startRow + 1, 1).getValues();
+  for (let i = values.length - 1; i >= 0; i--) {
+    if (String(values[i][0] || '').trim() !== '') return startRow + i + 1;
+  }
+  return startRow;
+}
+
+/**
+ * Rebuilds the Data Validation rule for the Supplier dropdown dynamically.
+ */
+function updateSupplierDropdown(ss) {
+  const uiSheet = ss.getSheetByName('Excel Export Format');
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  if (!uiSheet || !invSheet) return;
+
+  function parseCustomDate(val) {
+    if (!val) return null;
+    if (val instanceof Date) return new Date(val.getFullYear(), val.getMonth(), val.getDate());
+    if (typeof val === 'string') {
+      const parts = val.split(/[\/\-]/);
+      if (parts.length === 3) {
+        const day = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10) - 1; 
+        const year = parseInt(parts[2], 10);
+        if (year > 1000) return new Date(year, month, day); 
+      }
+      const fallback = new Date(val);
+      if (!isNaN(fallback.getTime())) return new Date(fallback.getFullYear(), fallback.getMonth(), fallback.getDate());
+    }
+    return null;
+  }
+
+  const type = String(uiSheet.getRange("C9").getValue() || "").trim().toLowerCase();
+  const sDate = parseCustomDate(uiSheet.getRange("D10").getValue());
+  const fDate = parseCustomDate(uiSheet.getRange("D11").getValue());
+  const tDate = parseCustomDate(uiSheet.getRange("D12").getValue());
+  
+  const invData = invSheet.getDataRange().getValues();
+  const invoices = invData.slice(1);
+  
+  let validSuppliers = new Set();
+  validSuppliers.add("All Suppliers"); 
+
+  for (let i = 0; i < invoices.length; i++) {
+    const inv = invoices[i];
+    const approvalStatus = String(inv[19] || "").trim().toLowerCase(); 
+    if (approvalStatus !== 'approved') continue;
+    
+    const approvalDate = parseCustomDate(inv[21]); 
+    let dateValid = true;
+    
+    if (type === "single date") {
+      if (sDate && (!approvalDate || approvalDate.getTime() !== sDate.getTime())) dateValid = false;
+    } else if (type === "date range") {
+      if (fDate && (!approvalDate || approvalDate.getTime() < fDate.getTime())) dateValid = false;
+      if (tDate && (!approvalDate || approvalDate.getTime() > tDate.getTime())) dateValid = false;
+    }
+    
+    if (dateValid) {
+      const vendorName = String(inv[2] || "").trim(); 
+      const supplierLedger = String(inv[18] || vendorName).trim();
+      if (supplierLedger) {
+        validSuppliers.add(supplierLedger);
+      }
+    }
+  }
+  
+  validSuppliers.delete("All Suppliers");
+  const supplierArray = ["All Suppliers", ...Array.from(validSuppliers).sort()];
+  
+  const rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(supplierArray, true)
+    .setAllowInvalid(false)
+    .build();
+    
+  const dropdownCell = uiSheet.getRange("F9");
+  dropdownCell.setDataValidation(rule);
+  
+  const currentVal = dropdownCell.getValue();
+  if (currentVal !== "All Suppliers" && !validSuppliers.has(currentVal)) {
+    dropdownCell.setValue("All Suppliers");
+  }
+}

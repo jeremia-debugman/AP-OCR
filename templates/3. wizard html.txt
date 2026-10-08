@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary: #1a73e8;
+      --success: #1e7e34;
+      --danger: #d93025;
+      --warning: #f2994a;
+      --bg: #f8f9fa;
+      --border: #dadce0;
+      --text: #202124;
+      --muted: #5f6368;
+    }
+    * { box-sizing: border-box; font-family: 'Poppins', sans-serif; }
+    body { margin: 0; padding: 16px; padding-bottom: 80px; background: var(--bg); color: var(--text); }
+
+    .header-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .title { font-size: 17px; font-weight: 600; color: #1f2937; }
+    .filter-chips { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+    .chip-btn {
+      padding: 6px 14px; border-radius: 16px; border: 1px solid var(--border);
+      background: #fff; cursor: pointer; font-size: 12px; font-weight: 500;
+    }
+    .chip-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+    .card { background: #fff; border-radius: 6px; border: 1px solid var(--border); padding: 14px; margin-bottom: 12px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; font-size: 13px; }
+    .field label { display: block; font-size: 11px; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+    .field input { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; }
+    .field input[readonly] { background: #f8f9fa; }
+
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+    th { background: #f1f3f4; text-align: left; padding: 7px 8px; border: 1px solid var(--border); font-weight: 600; }
+    td { padding: 6px 8px; border: 1px solid var(--border); }
+
+    .nav-bar { 
+      position: fixed; 
+      bottom: 0; 
+      left: 0; 
+      width: 100%; 
+      background: var(--bg); 
+      padding: 12px 16px; 
+      border-top: 1px solid var(--border); 
+      display: flex; 
+      justify-content: space-between; 
+      align-items: center; 
+      z-index: 50;
+    }
+    .btn { padding: 8px 16px; border-radius: 4px; border: none; font-size: 13px; font-weight: 500; cursor: pointer; }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-success { background: var(--success); color: #fff; }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-warning { background: var(--warning); color: #fff; }
+    .btn-outline { background: #fff; border: 1px solid var(--border); color: var(--text); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #rejectModal {
+      display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.5); justify-content: center; align-items: center; z-index: 100;
+    }
+    .modal-box { background: #fff; padding: 20px; border-radius: 6px; width: 420px; }
+  </style>
+</head>
+<body>
+
+  <div class="header-bar">
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <div class="title" id="counterText">Loading Invoices...</div>
+      <div id="statusBadge" style="display: none; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase;"></div>
+    </div>
+    <div class="filter-chips">
+      <span>Review Scope:</span>
+      <button class="chip-btn" id="scopeSelectedBtn" onclick="setScope('selected')">Selected in Sheet</button>
+      <button class="chip-btn active" id="scopeAllBtn" onclick="setScope('all')">All Ready Pending</button>
+    </div>
+  </div>
+
+  <div id="contentContainer" style="display: none;">
+    <!-- Voucher Header Card -->
+    <div class="card">
+      <div class="grid-4">
+        <div class="field">
+          <label>Invoice Number</label>
+          <input type="text" id="invNumber" readonly style="font-weight: bold;">
+        </div>
+        <div class="field">
+          <label>Vendor Name (OCR)</label>
+          <input type="text" id="rawVendor" readonly>
+        </div>
+        <div class="field">
+          <label>Invoice Date <span id="slaBadge" style="margin-left:6px; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:700;"></span></label>
+          <input type="text" id="invDate" readonly>
+        </div>
+        <div class="field">
+          <label>Total Amount (₹)</label>
+          <input type="text" id="invTotal" readonly style="font-weight: bold; color: var(--success);">
+        </div>
+      </div>
+      
+      <!-- NEW: Math Breakdown & GSTIN -->
+      <div class="grid-4" style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border);">
+        <div class="field">
+          <label>Vendor GSTIN</label>
+          <input type="text" id="invGstin" readonly style="color: var(--muted); font-size: 12px;">
+        </div>
+        <div class="field">
+          <label>Taxable (₹)</label>
+          <input type="text" id="invTaxable" readonly style="color: var(--muted); font-size: 12px;">
+        </div>
+        <div class="field">
+          <label>Total GST (₹)</label>
+          <input type="text" id="invGst" readonly style="color: var(--muted); font-size: 12px;">
+        </div>
+        <div class="field">
+          <label>Charges / Discount (₹)</label>
+          <input type="text" id="invCharges" readonly style="color: var(--muted); font-size: 12px;">
+        </div>
+      </div>
+      
+      <div style="margin-top: 10px;" class="field">
+        <label>Tally Supplier Ledger (Sundry Creditor)</label>
+        <input type="text" id="supplierLedger" placeholder="e.g. S.R. Agencies">
+      </div>
+    </div>
+
+    <!-- Line Items Table -->
+    <div class="card">
+      <div style="font-weight: 600; font-size: 13px; margin-bottom: 6px;">Line Item & Tally Ledger Mapping</div>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 35%;">Item Description</th>
+            <th style="width: 15%;">Type</th>
+            <th style="width: 35%;">Mapped Tally Ledger / Item</th>
+            <th style="width: 15%; text-align: right;">Total (₹)</th>
+          </tr>
+        </thead>
+        <tbody id="itemsTableBody"></tbody>
+      </table>
+    </div>
+
+    <!-- Actions & Pagination -->
+    <div class="nav-bar">
+      <div>
+        <button class="btn btn-outline" id="prevBtn" onclick="navigate(-1)">◄ Previous</button>
+        <button class="btn btn-outline" id="nextBtn" onclick="navigate(1)">Next ►</button>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn btn-warning" onclick="recordDecision('Skip')">Skip</button>
+        <button class="btn btn-danger" onclick="openRejectModal()">Reject</button>
+        <button class="btn btn-success" onclick="recordDecision('Approve')">Approve</button>
+      </div>
+      <div>
+        <button class="btn btn-primary" onclick="commitBatch()">Submit Decisions</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rejection Safeguard Modal -->
+  <div id="rejectModal">
+    <div class="modal-box">
+      <h4 style="margin-top: 0; color: var(--danger);">Rejection Safeguard</h4>
+      <p style="font-size: 12px; color: var(--muted); margin-bottom: 8px;">
+        Please specify a mandatory rejection reason:
+      </p>
+      <textarea id="rejectionReasonInput" rows="3" style="width: 100%; border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 13px;" placeholder="e.g. Missing HSN code, Rate mismatch with PO"></textarea>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;">
+        <button class="btn btn-outline" onclick="closeRejectModal()">Cancel</button>
+        <button class="btn btn-danger" onclick="confirmReject()">Confirm Rejection</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom In-App Toast -->
+  <div id="customToast" style="display:none; position:fixed; bottom:80px; left:50%; transform:translateX(-50%); background:#323232; color:#fff; padding:10px 20px; border-radius:20px; font-size:13px; z-index:9999; box-shadow:0 4px 6px rgba(0,0,0,0.1); text-align:center;"></div>
+  
+  <script>
+    let rawInvoices = [];
+    let filteredInvoices = [];
+    let currentIndex = 0;
+    let decisions = {};
+
+    window.onload = function() {
+      google.script.run
+        .withSuccessHandler(onDataLoaded)
+        .withFailureHandler(err => {
+          document.getElementById('counterText').innerText = 'Error loading queue.';
+          alert('Server Error: ' + err);
+        })
+        .getInvoicesForReview();
+    };
+
+    function onDataLoaded(res) {
+      if (Array.isArray(res)) {
+        rawInvoices = res;
+      } else if (res && Array.isArray(res.invoices)) {
+        rawInvoices = res.invoices;
+      } else {
+        rawInvoices = [];
+      }
+
+      if (rawInvoices.length === 0) {
+        document.getElementById('counterText').innerText = 'No pending invoices found in database.';
+        return;
+      }
+
+      const hasChecked = rawInvoices.some(i => i.isSelectedInQueue === true);
+      if (hasChecked) {
+        setScope('selected');
+      } else {
+        setScope('all');
+      }
+    }
+
+    function setScope(scope) {
+      document.getElementById('scopeSelectedBtn').classList.toggle('active', scope === 'selected');
+      document.getElementById('scopeAllBtn').classList.toggle('active', scope === 'all');
+
+      if (scope === 'selected') {
+        filteredInvoices = rawInvoices.filter(i => i.isSelectedInQueue === true);
+        if (filteredInvoices.length === 0) {
+          filteredInvoices = [...rawInvoices];
+          document.getElementById('scopeSelectedBtn').classList.remove('active');
+          document.getElementById('scopeAllBtn').classList.add('active');
+        }
+      } else {
+        filteredInvoices = [...rawInvoices];
+      }
+
+      currentIndex = 0;
+      renderCurrentInvoice();
+    }
+
+    function renderCurrentInvoice() {
+      if (!filteredInvoices || filteredInvoices.length === 0) {
+        document.getElementById('counterText').innerText = 'No invoices to display.';
+        document.getElementById('contentContainer').style.display = 'none';
+        document.getElementById('statusBadge').style.display = 'none';
+        return;
+      }
+
+      document.getElementById('contentContainer').style.display = 'block';
+      const inv = filteredInvoices[currentIndex];
+      document.getElementById('counterText').innerText = `Invoice ${currentIndex + 1} of ${filteredInvoices.length}`;
+
+      const dictKey = inv.invoiceNumber ? inv.invoiceNumber : ('row_' + inv.invRow);
+      const decision = decisions[dictKey];
+      const badge = document.getElementById('statusBadge');
+      
+      badge.style.display = 'block';
+      if (decision && decision.action === 'Approve') {
+        badge.innerText = 'Approve';
+        badge.style.background = '#e6f4ea'; badge.style.color = '#1e8e3e';
+      } else if (decision && decision.action === 'Reject') {
+        badge.innerText = 'Reject';
+        badge.style.background = '#fce8e6'; badge.style.color = '#d93025';
+      } else {
+        badge.innerText = 'Pending';
+        badge.style.background = '#f1f3f4'; badge.style.color = '#5f6368';
+      }
+
+      // Populate Header
+      document.getElementById('invNumber').value = inv.invoiceNumber || '(No Invoice Number)';
+      document.getElementById('rawVendor').value = inv.vendorName || '';
+      document.getElementById('invDate').value = inv.invoiceDate || '';
+
+      // SLA Warning Badge Logic
+      const slaBadge = document.getElementById('slaBadge');
+      if (inv.slaStatus === 'Exceeded SLA') {
+        slaBadge.innerText = `EXCEEDED (${inv.processingDays} DAYS)`;
+        slaBadge.style.background = '#fce8e6'; // Light Red
+        slaBadge.style.color = '#d93025';
+      } else if (inv.slaStatus === 'Future Dated') {
+        slaBadge.innerText = '⚠️ FUTURE DATED';
+        slaBadge.style.background = '#fef7e0'; // Light Yellow
+        slaBadge.style.color = '#e37400';
+      } else if (inv.slaStatus === 'Within SLA') {
+        slaBadge.innerText = `${inv.processingDays} DAYS`;
+        slaBadge.style.background = '#e6f4ea'; // Light Green
+        slaBadge.style.color = '#1e8e3e';
+      } else {
+        slaBadge.innerText = '';
+        slaBadge.style.background = 'transparent';
+      }
+      
+      let displayTotal = Number(inv.totalAmount || 0);
+      document.getElementById('invTotal').value = displayTotal.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+      
+      document.getElementById('supplierLedger').value = inv.supplierLedger || inv.vendorName || '';
+
+      // NEW: Populate the financial breakdown and GSTIN
+      document.getElementById('invGstin').value = inv.gstin || 'Unregistered';
+      document.getElementById('invTaxable').value = Number(inv.taxable || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+      
+      let totalGst = Number(inv.cgst || 0) + Number(inv.sgst || 0) + Number(inv.igst || 0) + Number(inv.cess || 0);
+      document.getElementById('invGst').value = totalGst.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+      
+      let chargesAndRoundoff = displayTotal - (Number(inv.taxable || 0) + totalGst);
+      document.getElementById('invCharges').value = chargesAndRoundoff.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+
+      // Populate Items Table
+      const tbody = document.getElementById('itemsTableBody');
+      tbody.innerHTML = '';
+      
+      if (!inv.items || inv.items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888; padding: 12px;">No line items found for this invoice.</td></tr>';
+      } else {
+        inv.items.forEach((item, idx) => {
+          const lineTotal = Number(item.total || 0);
+
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td><b>${item.desc || ''}</b><br><small style="color:#5f6368">HSN: ${item.hsn || '-'} | Qty: ${item.qty || 1} ${item.unit || 'NOS'} @ ₹${Number(item.rate || 0).toFixed(2)}</small></td>
+            <td>
+              <select style="width:100%; padding:4px;" onchange="toggleLineType(${idx}, this.value)">
+                <option value="Stock Item" ${item.lineType === 'Stock Item' ? 'selected' : ''}>Stock Item</option>
+                <option value="Ledger / Expense" ${item.lineType === 'Ledger / Expense' ? 'selected' : ''}>Ledger / Expense</option>
+                <option value="Service" ${item.lineType === 'Service' ? 'selected' : ''}>Service</option>
+                <option value="Discount" ${item.lineType === 'Discount' ? 'selected' : ''}>Discount</option>
+                <option value="Additional Charge" ${item.lineType === 'Additional Charge' ? 'selected' : ''}>Additional Charge</option>
+                <option value="Round Off" ${item.lineType === 'Round Off' ? 'selected' : ''}>Round Off</option>
+              </select>
+            </td>
+            <td>
+              <input type="text" id="stock_${idx}" value="${item.stockItem || item.expenseHead || ''}" 
+                     placeholder="Tally Ledger or Item Name" style="width:100%; padding:4px;">
+            </td>
+            <td style="text-align: right; font-weight: 500;">₹${lineTotal.toFixed(2)}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }
+
+      document.getElementById('prevBtn').disabled = currentIndex === 0;
+      document.getElementById('nextBtn').disabled = currentIndex === filteredInvoices.length - 1;
+    }
+
+    function toggleLineType(idx, newType) {
+      const inv = filteredInvoices[currentIndex];
+      inv.items[idx].lineType = newType;
+      const mappedInput = document.getElementById(`stock_${idx}`);
+
+      if (newType === 'Ledger / Expense') {
+        mappedInput.value = inv.items[idx].expenseHead || 'Purchase Account';
+      } else {
+        mappedInput.value = inv.items[idx].stockItem || inv.items[idx].desc || '';
+      }
+    }
+
+    function recordDecision(action, reason = '') {
+      const inv = filteredInvoices[currentIndex];
+      const supplierLedger = document.getElementById('supplierLedger').value.trim();
+
+      const updatedItems = (inv.items || []).map((it, idx) => ({
+        itemRow: it.itemRow,
+        desc: it.desc,
+        lineType: it.lineType,
+        stockItem: document.getElementById(`stock_${idx}`) ? document.getElementById(`stock_${idx}`).value.trim() : '',
+        expenseHead: document.getElementById(`expense_${idx}`) ? document.getElementById(`expense_${idx}`).value.trim() : ''
+      }));
+
+      const dictKey = inv.invoiceNumber ? inv.invoiceNumber : ('row_' + inv.invRow);
+
+      decisions[dictKey] = {
+        invRow: inv.invRow,
+        invoiceNumber: inv.invoiceNumber,
+        vendorName: inv.vendorName,
+        supplierLedger: supplierLedger || inv.vendorName,
+        action: action,
+        rejectionReason: reason,
+        items: updatedItems
+      };
+
+      if (currentIndex < filteredInvoices.length - 1) {
+        currentIndex++;
+        renderCurrentInvoice();
+      } else {
+        renderCurrentInvoice();
+        const toast = document.getElementById('customToast');
+        toast.innerText = 'All loaded invoices reviewed. Click "Submit Decisions" to commit changes.';
+        toast.style.display = 'block';
+        setTimeout(() => toast.style.display = 'none', 3500);
+      }
+    }
+
+    function navigate(delta) {
+      const target = currentIndex + delta;
+      if (target >= 0 && target < filteredInvoices.length) {
+        currentIndex = target;
+        renderCurrentInvoice();
+      }
+    }
+
+    function openRejectModal() {
+      document.getElementById('rejectionReasonInput').value = '';
+      document.getElementById('rejectModal').style.display = 'flex';
+    }
+
+    function closeRejectModal() {
+      document.getElementById('rejectModal').style.display = 'none';
+    }
+
+    function confirmReject() {
+      const reason = document.getElementById('rejectionReasonInput').value.trim();
+      if (!reason) {
+        alert('Rejection reason is mandatory.');
+        return;
+      }
+      closeRejectModal();
+      recordDecision('Reject', reason);
+    }
+
+    function commitBatch() {
+      const payload = Object.values(decisions);
+      if (payload.length === 0) {
+        alert('Please record at least one decision (Approve, Reject, or Skip) before submitting.');
+        return;
+      }
+
+      const submitBtn = document.querySelector('.btn-primary');
+      submitBtn.disabled = true;
+
+      document.getElementById('contentContainer').style.opacity = '0.5';
+      google.script.run
+        .withSuccessHandler(res => {
+          if (google.script && google.script.host && typeof google.script.host.close === 'function') {
+            google.script.host.close();
+          } else {
+            document.body.innerHTML = '<h3 style="text-align:center; margin-top:50px;">Submissions recorded. You can safely close this tab.</h3>';
+          }
+        })
+        .withFailureHandler(err => {
+          alert('Submission error: ' + err);
+          document.getElementById('contentContainer').style.opacity = '1';
+          submitBtn.disabled = false;
+        })
+        .submitReviewBatch(payload);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,677 @@
+// ============================================================================
+// PKC Management Consulting — Module 2: Approval Engine & Tally Exporter
+// ============================================================================
+
+// ---------- APPROVAL SCREEN STAGING ----------
+
+function syncPendingToApprovalScreen() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  const itemSheet = ss.getSheetByName('Item-wise Database');
+  const appSheet = ss.getSheetByName('Approval Screen');
+
+  if (!invSheet || !itemSheet || !appSheet) {
+    SpreadsheetApp.getUi().alert('Missing required sheet(s). Check tab names.');
+    return;
+  }
+
+  const invData = invSheet.getDataRange().getValues();
+  const itemData = itemSheet.getDataRange().getValues();
+
+  // Validate Item-wise Database: Col B (1), Col T (19) filled, Col U (20) === 'pending'
+  const itemValidationMap = new Map();
+
+  for (let j = 1; j < itemData.length; j++) {
+    const r = itemData[j];
+    const invNo = String(r[1] || '').trim();
+    if (!invNo) continue;
+
+    const colTValue = String(r[19] || '').trim(); // Mapped Tally Stock Item (index 19)
+    const colUStatus = String(r[20] || '').trim().toLowerCase(); // Approval Status (index 20)
+    
+    const isLineValid = (colTValue !== '') && (colUStatus === 'pending');
+
+    if (!itemValidationMap.has(invNo)) {
+      itemValidationMap.set(invNo, { count: 1, allValid: isLineValid });
+    } else {
+      const entry = itemValidationMap.get(invNo);
+      entry.count += 1;
+      if (!isLineValid) entry.allValid = false;
+    }
+  }
+
+  const lastAppRow = appSheet.getLastRow();
+  if (lastAppRow >= 5) {
+    appSheet.getRange(5, 2, lastAppRow - 4, 1).clearContent().removeCheckboxes();
+    appSheet.getRange(5, 3, lastAppRow - 4, 19).clearContent(); // Clears C through U
+  }
+
+  const snoList = [], readyRows = [];
+
+  // Validate Invoice-wise Database: Col F (5), Col S (18) filled, Col T (19) === 'pending'
+  for (let i = 1; i < invData.length; i++) {
+    const row = invData[i];
+    const invNo = String(row[5] || '').trim();
+    if (!invNo) continue;
+
+    const colSValue = String(row[18] || '').trim(); // Tally Ledger Name (index 18)
+    const colTStatus = String(row[19] || '').trim().toLowerCase(); // Approval Status (index 19)
+
+    const isInvoiceHeaderValid = (colSValue !== '') && (colTStatus === 'pending');
+    
+    const itemInfo = itemValidationMap.get(invNo);
+    const areInvoiceItemsValid = itemInfo && itemInfo.count > 0 && itemInfo.allValid === true;
+
+    if (!isInvoiceHeaderValid || !areInvoiceItemsValid) continue;
+
+    snoList.push([readyRows.length + 1]);
+
+    // Aligned to Approval Screen: D through U (18 columns total)
+    readyRows.push([
+      row[0],               // Col D: Timestamp
+      row[1],               // Col E: File Name
+      row[2],               // Col F: Vendor Name
+      row[3],               // Col G: Invoice Date
+      row[4],               // Col H: Expense Category
+      row[5],               // Col I: Invoice Number
+      row[6],               // Col J: Vendor GSTIN
+      Number(row[7]) || 0,  // Col K: Taxable Amount
+      Number(row[8]) || 0,  // Col L: CGST
+      Number(row[9]) || 0,  // Col M: SGST
+      Number(row[10]) || 0, // Col N: IGST
+      Number(row[11]) || 0, // Col O: Cess
+      Number(row[14]) || 0, // Col P: Additional Charges (from Inv DB Col O)
+      Number(row[12]) || 0, // Col Q: Discount (from Inv DB Col M)
+      Number(row[13]) || 0, // Col R: Round Off (from Inv DB Col N)
+      Number(row[15]) || 0, // Col S: Total Amount (from Inv DB Col P)
+      row[16],              // Col T: Due Date (from Inv DB Col Q)
+      row[17]               // Col U: Confidence (from Inv DB Col R)
+    ]);
+  }
+
+  if (readyRows.length > 0) {
+    const numRows = readyRows.length;
+    const maxRows = appSheet.getMaxRows();
+    if (4 + numRows > maxRows) appSheet.insertRowsAfter(maxRows, 4 + numRows - maxRows);
+
+    appSheet.getRange(5, 2, numRows, 1).insertCheckboxes();
+    appSheet.getRange(5, 3, numRows, 1).setValues(snoList);
+    appSheet.getRange(5, 4, numRows, 18).setValues(readyRows); // Writes 18 columns (D to U)
+
+    appSheet.getRange(5, 7, numRows, 1).setNumberFormat('dd/mm/yyyy');
+    appSheet.getRange(5, 11, numRows, 9).setNumberFormat('#,##0.00'); // Cols K through S (amounts)
+    appSheet.getRange(5, 20, numRows, 1).setNumberFormat('dd/mm/yyyy'); // Col T: Due Date
+    appSheet.getRange(5, 21, numRows, 1).setNumberFormat('0.00%');      // Col U: Confidence
+
+    ss.toast(`Staged ${numRows} fully validated invoice(s) for approval.`, 'Ready', 3);
+  } else {
+    ss.toast('No fully mapped invoices ready for approval yet.', 'Info', 3);
+  }
+}
+
+function clearApprovalScreen() {
+  const appSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Approval Screen');
+  if (!appSheet) return;
+  const lastRow = appSheet.getLastRow();
+  if (lastRow >= 5) {
+    appSheet.getRange(5, 2, lastRow - 4, 1).clearContent().removeCheckboxes();
+    appSheet.getRange(5, 3, lastRow - 4, 19).clearContent(); 
+  }
+  SpreadsheetApp.getActiveSpreadsheet().toast('Approval Screen cleared.', 'Complete', 3);
+}
+
+// ---------- REVIEW WIZARD BACKEND ----------
+
+function launchWizard() {
+  const html = HtmlService.createHtmlOutputFromFile('Wizard')
+    .setWidth(1180)
+    .setHeight(740)
+    .setTitle('AP Invoice Review & Approval Console');
+  SpreadsheetApp.getUi().showModalDialog(html, 'AP Invoice Review & Approval Console');
+}
+
+function getInvoicesForReview() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  const itemSheet = ss.getSheetByName('Item-wise Database');
+  const appSheet = ss.getSheetByName('Approval Screen');
+  const masterSheet = ss.getSheetByName('Tally Master');
+
+  const stagedInvoiceMap = new Map();
+  const appLastRow = appSheet.getLastRow();
+  if (appLastRow >= 5) {
+    // Read Cols B through I (8 columns); Col I is Invoice Number (index 7)
+    appSheet.getRange(5, 2, appLastRow - 4, 8).getValues().forEach(r => {
+      const invNo = String(r[7] || '').trim();
+      if (invNo) stagedInvoiceMap.set(invNo, r[0] === true);
+    });
+  }
+  if (stagedInvoiceMap.size === 0) return { invoices: [], hasSelections: false };
+
+  const masterDict = loadFastExactMasterDictionary(masterSheet);
+  const itemsByInvoice = {};
+  const itemData = itemSheet.getDataRange().getValues();
+
+  for (let j = 1; j < itemData.length; j++) {
+    const r = itemData[j];
+    const invNo = String(r[1] || '').trim();
+    if (!stagedInvoiceMap.has(invNo)) continue;
+
+    const rawDesc = String(r[5] || '').trim();
+    const descKey = rawDesc.toLowerCase();
+    const learnedStock = masterDict.exactItems.get(descKey);
+    const learnedExp = masterDict.exactExpenses.get(descKey);
+
+    let lineType = r[4] || (learnedStock ? 'Stock Item' : (learnedExp ? 'Ledger / Expense' : 'Stock Item'));
+    let mappedItem = r[19] || (learnedStock ? learnedStock.stockItem : (learnedExp ? learnedExp.expenseHead : '')); // Col T
+
+    if (!itemsByInvoice[invNo]) itemsByInvoice[invNo] = [];
+    itemsByInvoice[invNo].push({
+      itemRow: j + 1, 
+      lineType: lineType, 
+      desc: rawDesc, 
+      hsn: r[6],
+      qty: Number(r[7]) || 0, 
+      unit: r[8] || 'NOS', 
+      rate: Number(r[9]) || 0, 
+      taxable: Number(r[10]) || 0,
+      cgst: Number(r[12]) || 0, 
+      sgst: Number(r[13]) || 0, 
+      igst: Number(r[14]) || 0, 
+      cess: Number(r[15]) || 0,
+      total: Number(r[17]) || 0, // FIXED: Changed from r[16] to r[17] (Col R: Line Total)
+      stockItem: mappedItem, 
+      mappedItem: mappedItem
+    });
+  }
+
+  const invData = invSheet.getDataRange().getValues();
+  const invoices = [];
+  let hasSelections = false;
+
+  for (let i = 1; i < invData.length; i++) {
+    const r = invData[i];
+    const invNo = String(r[5] || '').trim();
+    if (!stagedInvoiceMap.has(invNo)) continue;
+
+    const isSelected = stagedInvoiceMap.get(invNo);
+    if (isSelected) hasSelections = true;
+    const rawVendor = String(r[2] || '').trim();
+    const suggestedSupplier = r[18] || masterDict.exactVendors.get(rawVendor.toLowerCase()) || rawVendor; // Col S
+
+    invoices.push({
+      invRow: i + 1, 
+      invoiceNumber: invNo, 
+      fileName: r[1], 
+      vendorName: rawVendor,
+      invoiceDate: formatDateForDisplay(r[3]), 
+      expenseCategory: r[4], 
+      gstin: r[6],
+      taxable: Number(r[7]) || 0, 
+      cgst: Number(r[8]) || 0, 
+      sgst: Number(r[9]) || 0, 
+      igst: Number(r[10]) || 0,
+      cess: Number(r[11]) || 0, 
+      totalAmount: Number(r[15]) || 0, 
+      supplierLedger: suggestedSupplier, 
+      isSelectedInQueue: isSelected, 
+      processingDays: r[24] !== "" ? Number(r[24]) : 0,  // Pulls Column Y
+      slaStatus: String(r[25] || "").trim(),             // Pulls Column Z
+      items: itemsByInvoice[invNo] || []
+    });
+  }
+
+  return { invoices: invoices, hasSelections: hasSelections };
+}
+
+function getInvoicesForApproval() {
+  return getInvoicesForReview();
+}
+
+function executeInvoiceDecision(d) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  const itemSheet = ss.getSheetByName('Item-wise Database');
+  const masterSheet = ss.getSheetByName('Tally Master');
+  const currentUser = Session.getActiveUser().getEmail() || 'AP Approver';
+  const now = new Date();
+
+  const invRow = parseInt(d.invRow, 10);
+  const isApproved = d.action === 'Approve';
+  const finalStatus = isApproved ? 'Approved' : 'Rejected';
+  const rejectionReason = isApproved ? '' : (d.rejectionReason || 'Rejected by Approver');
+
+  // Col S (19), Col T (20), Col U (21), Col V (22), Col W (23)
+  invSheet.getRange(invRow, 19).setValue(d.supplierLedger);
+  invSheet.getRange(invRow, 20).setValue(finalStatus);     
+  invSheet.getRange(invRow, 21).setValue(currentUser);     
+  invSheet.getRange(invRow, 22).setValue(now);             
+  invSheet.getRange(invRow, 23).setValue(rejectionReason); 
+
+  if (d.items && d.items.length > 0) {
+    d.items.forEach(it => {
+      const itemRow = parseInt(it.itemRow, 10);
+      const mappedVal = it.mappedItem || it.stockItem || '';
+      itemSheet.getRange(itemRow, 5).setValue(it.lineType);
+      itemSheet.getRange(itemRow, 19).setValue(d.supplierLedger);
+      itemSheet.getRange(itemRow, 20).setValue(mappedVal);
+      itemSheet.getRange(itemRow, 21).setValue(finalStatus);
+      itemSheet.getRange(itemRow, 22).setValue(currentUser);
+      itemSheet.getRange(itemRow, 23).setValue(now);
+      itemSheet.getRange(itemRow, 24).setValue(rejectionReason);
+    });
+  }
+
+  if (masterSheet && isApproved) {
+    const knownVendors = new Set(), knownItems = new Set(), knownExpenses = new Set();
+    if (masterSheet.getLastRow() >= 5) {
+      masterSheet.getRange(5, 1, masterSheet.getLastRow() - 4, 8).getValues().forEach(r => {
+        const v = String(r[1] || '').trim().toLowerCase();
+        const it = String(r[4] || '').trim().toLowerCase();
+        const ex = String(r[7] || '').trim().toLowerCase();
+        if (v) knownVendors.add(v);
+        if (it) knownItems.add(it);
+        if (ex) knownExpenses.add(ex);
+      });
+    }
+
+    if (d.vendorName && d.supplierLedger && !isReservedWord(d.supplierLedger) && !knownVendors.has(d.vendorName.toLowerCase())) {
+      masterSheet.getRange(getNextEmptyRow(masterSheet, 1, 5), 1, 1, 2).setValues([[d.supplierLedger, d.vendorName]]);
+    }
+
+    const newItems = [], newExpenses = [];
+    if (d.items && d.items.length > 0) {
+      d.items.forEach(it => {
+        if (!it.desc) return;
+        const descKey = it.desc.toLowerCase();
+        const mappedVal = it.mappedItem || it.stockItem || '';
+        if (it.lineType === 'Stock Item' && mappedVal && !isReservedWord(mappedVal) && !knownItems.has(descKey)) {
+          newItems.push([mappedVal, it.desc]);
+          knownItems.add(descKey);
+        } else if (it.lineType !== 'Stock Item' && mappedVal && !isReservedWord(mappedVal) && !knownExpenses.has(descKey)) {
+          newExpenses.push([mappedVal, it.desc]);
+          knownExpenses.add(descKey);
+        }
+      });
+    }
+    if (newItems.length > 0) masterSheet.getRange(getNextEmptyRow(masterSheet, 4, 5), 4, newItems.length, 2).setValues(newItems);
+    if (newExpenses.length > 0) masterSheet.getRange(getNextEmptyRow(masterSheet, 7, 5), 7, newExpenses.length, 2).setValues(newExpenses);
+  }
+
+  syncPendingToApprovalScreen();
+  return { success: true, invoiceNumber: d.invoiceNumber, action: d.action };
+}
+
+// ---------- TALLY EXPORT ENGINE ----------
+
+function exportApprovedToTallyXml() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  const itemSheet = ss.getSheetByName('Item-wise Database');
+  if (!invSheet || !itemSheet) { SpreadsheetApp.getUi().alert('Database sheets not found.'); return; }
+
+  const invData = invSheet.getDataRange().getValues();
+  const itemData = itemSheet.getDataRange().getValues();
+  const itemsMap = {};
+
+  for (let j = 1; j < itemData.length; j++) {
+    const r = itemData[j];
+    const invNo = String(r[1] || '').trim();
+    const status = String(r[20] || '').trim().toLowerCase(); // Col U
+    if (status !== 'approved') continue;
+    if (!itemsMap[invNo]) itemsMap[invNo] = [];
+    itemsMap[invNo].push({
+      lineType: r[4] || 'Stock Item', 
+      desc: r[5], 
+      qty: Number(r[7]) || 0, 
+      unit: r[8] || 'NOS', 
+      rate: Number(r[9]) || 0,
+      taxable: Number(r[10]) || 0, 
+      cgst: Number(r[12]) || 0, 
+      sgst: Number(r[13]) || 0, 
+      igst: Number(r[14]) || 0, 
+      cess: Number(r[15]) || 0,
+      total: Number(r[17]) || 0, // FIXED: Changed from r[16] to r[17] (Col R)
+      stockItem: r[19] || r[5]
+    });
+  }
+
+  let xmlVouchers = '', exportCount = 0;
+
+  for (let i = 1; i < invData.length; i++) {
+    const r = invData[i];
+    const invNo = String(r[5] || '').trim();
+    const status = String(r[19] || '').trim().toLowerCase(); // Col T
+    if (status !== 'approved') continue;
+
+    const items = itemsMap[invNo] || [];
+    const invDate = formatTallyDate(r[3]);
+    const supplierLedger = r[18] || r[2]; // Col S
+    const totalAmount = Number(r[15]) || 0; // Col P
+    const cgst = Number(r[8]) || 0, sgst = Number(r[9]) || 0, igst = Number(r[10]) || 0, cess = Number(r[11]) || 0;
+    const narration = `Bill #${invNo} | Approver: ${r[20] || 'AP Team'}`;
+
+    xmlVouchers += `
+      <TALLYMESSAGE xmlns:UDF="TallyUDF">
+        <VOUCHER VCHTYPE="${escapeXml(APP_CONFIG.VOUCHER_TYPE)}" ACTION="Create" OBJVIEW="Invoice Voucher View">
+          <DATE>${invDate}</DATE>
+          <REFERENCEDATE>${invDate}</REFERENCEDATE>
+          <VOUCHERTYPENAME>${escapeXml(APP_CONFIG.VOUCHER_TYPE)}</VOUCHERTYPENAME>
+          <REFERENCE>${escapeXml(invNo)}</REFERENCE>
+          <PARTYLEDGERNAME>${escapeXml(supplierLedger)}</PARTYLEDGERNAME>
+          <NARRATION>${escapeXml(narration)}</NARRATION>
+          <ISINVOICE>Yes</ISINVOICE>
+          <LEDGERENTRIES.LIST>
+            <LEDGERNAME>${escapeXml(supplierLedger)}</LEDGERNAME>
+            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+            <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
+            <AMOUNT>${totalAmount.toFixed(2)}</AMOUNT>
+          </LEDGERENTRIES.LIST>
+    `;
+
+    let allocatedDebit = 0;
+
+    items.filter(it => it.lineType === 'Stock Item').forEach(it => {
+      allocatedDebit += it.taxable;
+      xmlVouchers += `
+          <ALLINVENTORYENTRIES.LIST>
+            <STOCKITEMNAME>${escapeXml(it.stockItem)}</STOCKITEMNAME>
+            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+            <RATE>${it.rate.toFixed(2)} / ${escapeXml(it.unit)}</RATE>
+            <ACTUALQTY>${it.qty} ${escapeXml(it.unit)}</ACTUALQTY>
+            <BILLEDQTY>${it.qty} ${escapeXml(it.unit)}</BILLEDQTY>
+            <AMOUNT>${(-Math.abs(it.taxable)).toFixed(2)}</AMOUNT>
+            <ACCOUNTINGALLOCATIONS.LIST>
+              <LEDGERNAME>${escapeXml(APP_CONFIG.DEFAULT_PURCHASE_HEAD)}</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>${(-Math.abs(it.taxable)).toFixed(2)}</AMOUNT>
+            </ACCOUNTINGALLOCATIONS.LIST>
+          </ALLINVENTORYENTRIES.LIST>
+      `;
+    });
+
+    items.filter(it => it.lineType !== 'Stock Item').forEach(it => {
+      allocatedDebit += it.taxable;
+      xmlVouchers += `
+          <LEDGERENTRIES.LIST>
+            <LEDGERNAME>${escapeXml(it.stockItem || it.desc)}</LEDGERNAME>
+            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+            <AMOUNT>${(-Math.abs(it.taxable)).toFixed(2)}</AMOUNT>
+          </LEDGERENTRIES.LIST>
+      `;
+    });
+
+    [['CGST', cgst], ['SGST', sgst], ['IGST', igst], ['CESS', cess]].forEach(([key, amt]) => {
+      if (amt > 0) {
+        allocatedDebit += amt;
+        xmlVouchers += `
+          <LEDGERENTRIES.LIST>
+            <LEDGERNAME>${escapeXml(APP_CONFIG.TAX_LEDGERS[key])}</LEDGERNAME>
+            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+            <AMOUNT>${(-Math.abs(amt)).toFixed(2)}</AMOUNT>
+          </LEDGERENTRIES.LIST>
+      `;
+      }
+    });
+
+    const roundOff = Number((totalAmount - allocatedDebit).toFixed(2));
+    if (Math.abs(roundOff) > 0.001) {
+      xmlVouchers += `
+          <LEDGERENTRIES.LIST>
+            <LEDGERNAME>${escapeXml(APP_CONFIG.DEFAULT_ROUNDOFF_LEDGER)}</LEDGERNAME>
+            <ISDEEMEDPOSITIVE>${roundOff > 0 ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
+            <AMOUNT>${(roundOff > 0 ? -Math.abs(roundOff) : Math.abs(roundOff)).toFixed(2)}</AMOUNT>
+          </LEDGERENTRIES.LIST>
+      `;
+    }
+
+    xmlVouchers += `
+        </VOUCHER>
+      </TALLYMESSAGE>
+    `;
+    exportCount++;
+  }
+
+  if (exportCount === 0) { SpreadsheetApp.getUi().alert('No approved invoices found to export.'); return; }
+
+  const envelope = `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Vouchers</REPORTNAME>
+        <STATICVARIABLES><SVCURRENTCOMPANY>${escapeXml(APP_CONFIG.COMPANY_NAME)}</SVCURRENTCOMPANY></STATICVARIABLES>
+      </REQUESTDESC>
+      <REQUESTDATA>${xmlVouchers}</REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+
+  const fileName = `Tally_Purchase_${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss')}.xml`;
+  const file = DriveApp.createFile(fileName, envelope, MimeType.XML);
+
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 16px;">
+      <h3 style="color: #1e7e34; margin-top:0;">✔ Tally XML Ready</h3>
+      <p>Exported <b>${exportCount}</b> approved invoice(s).</p>
+      <p><a href="${file.getUrl()}" target="_blank" style="background: #1a73e8; color: #fff; padding: 8px 16px; text-decoration: none; border-radius: 4px; font-weight: 500;">Download XML File</a></p>
+      <small style="color: #5f6368;">Import: Open Tally Prime ➔ <code>Alt + O</code> (Import) ➔ <b>Transactions</b> ➔ Select XML.</small>
+    </div>
+  `;
+  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(420).setHeight(220), 'Export Complete');
+}
+
+function buildApprovedInvoiceRegister() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const TAB_NAME = 'Approved Invoice Register - Excel Export';
+  let exportSheet = ss.getSheetByName(TAB_NAME) || ss.insertSheet(TAB_NAME);
+  exportSheet.clear();
+
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  const itemSheet = ss.getSheetByName('Item-wise Database');
+  const invRows = invSheet.getDataRange().getValues();
+  const itemRows = itemSheet.getDataRange().getValues();
+
+  const headers = [
+    'Voucher Date', 'Voucher Type', 'Invoice Number', 'Party Ledger Name', 'GSTIN', 'Line Type',
+    'Item / Particular Name', 'HSN/SAC', 'Quantity', 'Unit', 'Rate', 'Taxable Value', 'CGST', 'SGST', 'IGST',
+    'Cess', 'Total Line Value', 'Approval Date', 'Approver'
+  ];
+
+  const exportData = [headers];
+  const itemMap = {};
+
+  for (let j = 1; j < itemRows.length; j++) {
+    const r = itemRows[j];
+    const invNo = String(r[1] || '').trim();
+    if (String(r[20] || '').trim().toLowerCase() === 'approved') {
+      if (!itemMap[invNo]) itemMap[invNo] = [];
+      itemMap[invNo].push(r);
+    }
+  }
+
+  for (let i = 1; i < invRows.length; i++) {
+    const inv = invRows[i];
+    const invNo = String(inv[5] || '').trim();
+    if (String(inv[19] || '').trim().toLowerCase() !== 'approved') continue;
+    (itemMap[invNo] || []).forEach(it => {
+      exportData.push([
+        formatDateForDisplay(inv[3]), 'Purchase', invNo, inv[18] || inv[2], inv[6], it[4], it[19] || it[5],
+        it[6], it[7], it[8], it[9], it[10], it[12], it[13], it[14], it[15], 
+        it[17], // FIXED: Changed from it[16] to it[17] (Col R: Line Total)
+        formatDateForDisplay(inv[21]), inv[20]
+      ]);
+    });
+  }
+
+  if (exportData.length <= 1) { SpreadsheetApp.getUi().alert('No approved records found to generate register.'); return; }
+
+  exportSheet.getRange(1, 1, exportData.length, headers.length).setValues(exportData);
+  exportSheet.getRange(1, 1, 1, headers.length).setBackground('#002B49').setFontColor('#ffffff').setFontWeight('bold').setHorizontalAlignment('center');
+  exportSheet.setFrozenRows(1);
+  exportSheet.autoResizeColumns(1, headers.length);
+  SpreadsheetApp.getUi().alert(`Export register updated with ${exportData.length - 1} rows.`);
+}
+
+// ---------- FORMATTING HELPERS ----------
+
+function formatDateForDisplay(val) {
+  if (!val) return '';
+  const d = (val instanceof Date) ? val : new Date(val);
+  return isNaN(d.getTime()) ? String(val) : Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+
+function formatTallyDate(val) {
+  if (!val) return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd');
+  const d = (val instanceof Date) ? val : new Date(val);
+  return isNaN(d.getTime()) ? Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd') : Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyyMMdd');
+}
+
+function escapeXml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+// ---------- FAST DICTIONARY FOR REVIEW WIZARD ----------
+function loadFastExactMasterDictionary(masterSheet) {
+  const dict = { exactVendors: new Map(), exactItems: new Map(), exactExpenses: new Map() };
+  if (!masterSheet || masterSheet.getLastRow() < 5) return dict;
+  
+  const data = masterSheet.getRange(5, 1, masterSheet.getLastRow() - 4, 8).getValues();
+  
+  for (let i = 0; i < data.length; i++) {
+    const tallyVendor = String(data[i][0] || '').trim();
+    const rawVendor = String(data[i][1] || '').trim().toLowerCase();
+    const checkReserved = (val) => (typeof isReservedWord === 'function') ? isReservedWord(val) : false;
+
+    if (tallyVendor && rawVendor && !checkReserved(tallyVendor)) {
+      dict.exactVendors.set(rawVendor, tallyVendor);
+    }
+    
+    const tallyItem = String(data[i][3] || '').trim();
+    const rawItem = String(data[i][4] || '').trim().toLowerCase();
+    if (tallyItem && rawItem && !checkReserved(tallyItem)) {
+      dict.exactItems.set(rawItem, { stockItem: tallyItem });
+    }
+
+    const tallyExpense = String(data[i][6] || '').trim();
+    const rawExpense = String(data[i][7] || '').trim().toLowerCase();
+    if (tallyExpense && rawExpense && !checkReserved(tallyExpense)) {
+      dict.exactExpenses.set(rawExpense, { expenseHead: tallyExpense });
+    }
+  }
+  return dict;
+}
+
+// ---------- OPTIMIZED BATCH SUBMISSION ----------
+function submitReviewBatch(payload) {
+  if (!payload || payload.length === 0) return { count: 0 };
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  const itemSheet = ss.getSheetByName('Item-wise Database');
+  const masterSheet = ss.getSheetByName('Tally Master');
+  
+  const currentUser = Session.getActiveUser().getEmail() || 'AP Approver';
+  const now = new Date();
+
+  const invData = invSheet.getDataRange().getValues();
+  const itemData = itemSheet.getDataRange().getValues();
+  let invModified = false, itemModified = false;
+
+  const newVendors = [], newItems = [], newExpenses = [];
+  const knownVendors = new Set(), knownItems = new Set(), knownExpenses = new Set();
+  
+  if (masterSheet && masterSheet.getLastRow() >= 5) {
+    masterSheet.getRange(5, 1, masterSheet.getLastRow() - 4, 8).getValues().forEach(r => {
+      if (r[1]) knownVendors.add(String(r[1]).trim().toLowerCase());
+      if (r[4]) knownItems.add(String(r[4]).trim().toLowerCase());
+      if (r[7]) knownExpenses.add(String(r[7]).trim().toLowerCase());
+    });
+  }
+
+  payload.forEach(d => {
+    if (d.action === 'Skip') return;
+
+    const invRowIdx = parseInt(d.invRow, 10) - 1; 
+    const isApproved = d.action === 'Approve';
+    const finalStatus = isApproved ? 'Approved' : 'Rejected';
+    const rejectionReason = isApproved ? '' : (d.rejectionReason || 'Rejected by Approver');
+
+    if (invRowIdx >= 0 && invRowIdx < invData.length) {
+      invData[invRowIdx][18] = d.supplierLedger;
+      invData[invRowIdx][19] = finalStatus;     
+      invData[invRowIdx][20] = currentUser;     
+      invData[invRowIdx][21] = now;             
+      invData[invRowIdx][22] = rejectionReason; 
+      invModified = true;
+    }
+
+    if (d.items && d.items.length > 0) {
+      d.items.forEach(it => {
+        const itemRowIdx = parseInt(it.itemRow, 10) - 1; 
+        if (itemRowIdx >= 0 && itemRowIdx < itemData.length) {
+          const mappedVal = it.stockItem || it.expenseHead || '';
+          
+          itemData[itemRowIdx][4] = it.lineType; 
+          itemData[itemRowIdx][18] = d.supplierLedger; 
+          itemData[itemRowIdx][19] = mappedVal; 
+          itemData[itemRowIdx][20] = finalStatus; 
+          itemData[itemRowIdx][21] = currentUser; 
+          itemData[itemRowIdx][22] = now;         
+          itemData[itemRowIdx][23] = rejectionReason; 
+          itemModified = true;
+        }
+      });
+    }
+
+    if (isApproved && masterSheet) {
+      const checkReserved = (val) => (typeof isReservedWord === 'function') ? isReservedWord(val) : false;
+      
+      if (d.vendorName && d.supplierLedger && !checkReserved(d.supplierLedger)) {
+        const vKey = String(d.vendorName).trim().toLowerCase();
+        if (!knownVendors.has(vKey)) {
+          newVendors.push([d.supplierLedger, d.vendorName]);
+          knownVendors.add(vKey);
+        }
+      }
+
+      if (d.items && d.items.length > 0) {
+        d.items.forEach(it => {
+          if (!it.desc) return;
+          const descKey = String(it.desc).trim().toLowerCase();
+          const mappedVal = it.stockItem || it.expenseHead || '';
+          
+          if (it.lineType === 'Stock Item' && mappedVal && !checkReserved(mappedVal) && !knownItems.has(descKey)) {
+            newItems.push([mappedVal, it.desc]);
+            knownItems.add(descKey);
+          } else if (it.lineType !== 'Stock Item' && mappedVal && !checkReserved(mappedVal) && !knownExpenses.has(descKey)) {
+            newExpenses.push([mappedVal, it.desc]);
+            knownExpenses.add(descKey);
+          }
+        });
+      }
+    }
+  });
+
+  if (invModified) invSheet.getRange(1, 1, invData.length, invData[0].length).setValues(invData);
+  if (itemModified) itemSheet.getRange(1, 1, itemData.length, itemData[0].length).setValues(itemData);
+
+  const getNext = (sheet, colIndex, startRow) => {
+    if (typeof getNextEmptyRow === 'function') return getNextEmptyRow(sheet, colIndex, startRow);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < startRow) return startRow;
+    const values = sheet.getRange(startRow, colIndex, lastRow - startRow + 1, 1).getValues();
+    for (let i = values.length - 1; i >= 0; i--) { if (String(values[i][0] || '').trim() !== '') return startRow + i + 1; }
+    return startRow;
+  };
+
+  if (newVendors.length > 0) masterSheet.getRange(getNext(masterSheet, 1, 5), 1, newVendors.length, 2).setValues(newVendors);
+  if (newItems.length > 0) masterSheet.getRange(getNext(masterSheet, 4, 5), 4, newItems.length, 2).setValues(newItems);
+  if (newExpenses.length > 0) masterSheet.getRange(getNext(masterSheet, 7, 5), 7, newExpenses.length, 2).setValues(newExpenses);
+
+  syncPendingToApprovalScreen();
+  SpreadsheetApp.getActiveSpreadsheet().toast(`Successfully updated ${payload.filter(d => d.action !== 'Skip').length} invoice(s) in the database!`, 'Success', 4);
+  return { count: payload.filter(d => d.action !== 'Skip').length };
+}

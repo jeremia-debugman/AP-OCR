@@ -1,0 +1,249 @@
+// ====================================================
+// APPROVED INVOICE REGISTER & JOURNAL GENERATOR
+// ====================================================
+
+/**
+ * Custom function to generate balanced journal entries.
+ * Paste this formula in B16: =GET_JOURNAL_DATA(C9, D10, D11, D12, F9)
+ * 
+ * @customfunction
+ */
+function GET_JOURNAL_DATA(filterType, singleDate, fromDate, toDate, supplierFilter) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const invSheet = ss.getSheetByName('Invoice-wise Database');
+  const itemSheet = ss.getSheetByName('Item-wise Database');
+
+  if (!invSheet || !itemSheet) return [["Error: Database sheets not found", "", "", "", "", "", "", "", "", ""]];
+
+  const invData = invSheet.getDataRange().getValues();
+  const itemData = itemSheet.getDataRange().getValues();
+
+  const invoices = invData.slice(1);
+  const items = itemData.slice(1);
+
+  let results = [];
+
+  // Robust Date Parser
+  function parseCustomDate(val) {
+    if (!val) return null;
+    if (val instanceof Date) return new Date(val.getFullYear(), val.getMonth(), val.getDate());
+    if (typeof val === 'string') {
+      const parts = val.split(/[\/\-]/);
+      if (parts.length === 3) {
+        const day = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10) - 1; 
+        const year = parseInt(parts[2], 10);
+        if (year > 1000) return new Date(year, month, day); 
+      }
+      const fallback = new Date(val);
+      if (!isNaN(fallback.getTime())) return new Date(fallback.getFullYear(), fallback.getMonth(), fallback.getDate());
+    }
+    return null;
+  }
+
+  // Parse UI Filters
+  const type = String(filterType || "").trim().toLowerCase();
+  const sDate = parseCustomDate(singleDate);
+  const fDate = parseCustomDate(fromDate);
+  const tDate = parseCustomDate(toDate);
+  const filterSupplier = String(supplierFilter || "").trim();
+
+  for (let i = 0; i < invoices.length; i++) {
+    const inv = invoices[i];
+    const approvalStatus = String(inv[19] || "").trim().toLowerCase(); 
+    if (approvalStatus !== 'approved') continue;
+
+    const approvalDate = parseCustomDate(inv[21]); 
+    
+    // Apply Date Filters
+    if (type === "single date") {
+      if (sDate && (!approvalDate || approvalDate.getTime() !== sDate.getTime())) continue;
+    } else if (type === "date range") {
+      if (fDate && (!approvalDate || approvalDate.getTime() < fDate.getTime())) continue;
+      if (tDate && (!approvalDate || approvalDate.getTime() > tDate.getTime())) continue;
+    }
+
+    const vendorName = String(inv[2] || "").trim(); 
+    const supplierLedger = String(inv[18] || vendorName).trim(); 
+
+    // Apply Supplier Filter
+    if (filterSupplier && filterSupplier !== "All Suppliers" && vendorName !== filterSupplier && supplierLedger !== filterSupplier) continue;
+
+    const invDate = inv[3]; 
+    const expCat = inv[4];  
+    const invNo = inv[5];   
+    const gstin = inv[6];   
+    
+    // Header Financials
+    const cgst = Number(inv[8]) || 0;
+    const sgst = Number(inv[9]) || 0;
+    const igst = Number(inv[10]) || 0;
+    const cess = Number(inv[11]) || 0;
+    const discount = Number(inv[12]) || 0;
+    const headerRoundOff = Number(inv[13]) || 0;
+    const addlCharges = Number(inv[14]) || 0;
+    const totalAmt = Number(inv[15]) || 0;
+
+    const sheetRow = i + 2; 
+    const vchNo = "PUR-" + String(sheetRow).padStart(4, '0');
+    const invItems = items.filter(r => String(r[1]).trim() === String(invNo).trim());
+    
+    let currentDr = 0;
+    let currentCr = 0;
+    let invoiceHasLines = false;
+
+    // Helper to push rows and track balance
+    function addRow(name, amount, isDr) {
+      if (Math.abs(amount) > 0) {
+        results.push([invDate, expCat, vchNo, invNo, invDate, name, Math.abs(amount), isDr ? "Dr" : "Cr", "", gstin]);
+        if (isDr) currentDr += Math.abs(amount);
+        else currentCr += Math.abs(amount);
+      }
+    }
+
+    // 1. Debits: Line Items
+    let totalPurchases = 0;
+    
+    invItems.forEach(item => {
+      const lineType = String(item[4] || "").trim(); // Column E: Line Type
+      const itemDesc = String(item[19] || item[5]).trim(); // Try mapped ledger first, then desc
+      const taxable = Number(item[10]) || 0; 
+      
+      if (Math.abs(taxable) > 0) {
+        if (lineType === "Stock Item") {
+          // Sum up all inventory items into one bucket
+          totalPurchases += taxable;
+        } else {
+          // Leave non-stock items (like Freight/Delivery) as separate lines
+          addRow(itemDesc, taxable, true);
+        }
+        invoiceHasLines = true;
+      }
+    });
+
+    // Add the consolidated Purchases A/c row
+    if (Math.abs(totalPurchases) > 0) {
+      addRow("Purchases A/c", totalPurchases, true);
+    }
+
+    // 2. Debits: Consolidated Taxes & Charges
+    addRow("Input CGST", cgst, true);
+    addRow("Input SGST", sgst, true);
+    addRow("Input IGST", igst, true);
+    addRow("Input Cess", cess, true);
+
+    // 3. Credits: Header Discounts
+    addRow("Discount Received", discount, false);
+
+    // 4. Auto-Balancing Math (Forces Dr == Cr perfectly)
+    // We want (currentDr - currentCr) to perfectly equal totalAmt
+    let variance = totalAmt - (currentDr - currentCr);
+    
+    // Add explicitly extracted header round off, plus any OCR variance
+    let finalRoundOff = headerRoundOff + variance;
+
+    if (Math.abs(finalRoundOff) > 0.001) {
+      addRow("Round Off A/c", Math.abs(finalRoundOff), finalRoundOff > 0);
+    }
+
+    // 5. Credit: Supplier Total
+    if (invoiceHasLines || totalAmt > 0) {
+      results.push([invDate, expCat, vchNo, invNo, invDate, supplierLedger, Math.abs(totalAmt), "Cr", "", gstin]);
+    }
+  }
+
+  if (results.length === 0) return [["No data matches current filters", "", "", "", "", "", "", "", "", ""]];
+  return results;
+}
+
+function exportApprovedInvoicesToExcel() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Excel Export Format");
+
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert("Sheet 'Excel Export Format' was not found.");
+    return;
+  }
+
+  SpreadsheetApp.flush();
+
+  const headerRow = 15;
+  const startColumn = 2;       // B
+  const numberOfColumns = 10;  // B to K
+
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < headerRow + 1) {
+    SpreadsheetApp.getUi().alert("There are no journal entries available to export.");
+    return;
+  }
+
+  // Read Headers + Displayed Data
+  const registerData = sheet.getRange(headerRow, startColumn, lastRow - headerRow + 1, numberOfColumns).getValues();
+  const headers = registerData[0];
+
+  // Filter out completely empty rows or error messages
+  const dataRows = registerData.slice(1).filter(row => {
+    return String(row[0] || "").trim() !== "" && String(row[0] || "").indexOf("No data") === -1 && String(row[0] || "").indexOf("Error") === -1;
+  });
+
+  if (dataRows.length === 0) {
+    SpreadsheetApp.getUi().alert("No valid journal entries match the current filters.");
+    return;
+  }
+
+  // Create temporary Excel export
+  const timeZone = Session.getScriptTimeZone();
+  const timestamp = Utilities.formatDate(new Date(), timeZone, "dd-MMM-yyyy_HH-mm-ss");
+  const tempSS = SpreadsheetApp.create("Tally Journal Export - " + timestamp);
+  const exportSheet = tempSS.getSheets()[0];
+  exportSheet.setName("Journal Entries");
+
+  // Write Data
+  exportSheet.getRange(1, 1, 1, numberOfColumns).setValues([headers]);
+  exportSheet.getRange(2, 1, dataRows.length, numberOfColumns).setValues(dataRows);
+
+  // Formatting
+  exportSheet.getRange(1, 1, 1, numberOfColumns).setFontWeight("bold");
+  exportSheet.setFrozenRows(1);
+  exportSheet.getRange(2, 1, dataRows.length, 1).setNumberFormat("dd-mmm-yyyy"); // Voucher Date
+  exportSheet.getRange(2, 5, dataRows.length, 1).setNumberFormat("dd-mmm-yyyy"); // Reference Date
+  exportSheet.getRange(2, 7, dataRows.length, 1).setNumberFormat("#,##0.00");    // Ledger Amount
+  exportSheet.getRange(2, 10, dataRows.length, 1).setNumberFormat("@");          // GSTIN as Text
+  
+  exportSheet.autoResizeColumns(1, numberOfColumns);
+  SpreadsheetApp.flush();
+
+  const exportUrl = "https://docs.google.com/spreadsheets/d/" + tempSS.getId() + "/export?format=xlsx";
+  const token = ScriptApp.getOAuthToken();
+
+  const response = UrlFetchApp.fetch(exportUrl, {
+    method: "get",
+    headers: { Authorization: "Bearer " + token },
+    muteHttpExceptions: true
+  });
+
+  if (response.getResponseCode() !== 200) {
+    DriveApp.getFileById(tempSS.getId()).setTrashed(true);
+    SpreadsheetApp.getUi().alert("Excel export failed. Please try again.");
+    return;
+  }
+
+  const fileName = "Tally_Journal_Export_" + timestamp + ".xlsx";
+  const xlsxBlob = response.getBlob().setName(fileName);
+  const folders = DriveApp.getFoldersByName("Excel Exports");
+  let exportFolder = folders.hasNext() ? folders.next() : DriveApp.createFolder("Excel Exports");
+  const file = exportFolder.createFile(xlsxBlob);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  DriveApp.getFileById(tempSS.getId()).setTrashed(true);
+
+  const html = HtmlService.createHtmlOutput(`
+    <html><body style="font-family: Arial, sans-serif; padding: 18px;">
+      <h3 style="color: #1a73e8; margin-top:0;">Excel Export Successful</h3>
+      <p><b>${dataRows.length} journal line(s) exported.</b></p>
+      <p>The file reflects the current filtered view formatted for Tally journal entry.</p>
+      <p><a href="${file.getDownloadUrl()}" target="_blank" style="display:inline-block; padding:10px 18px; background:#1a73e8; color:white; text-decoration:none; border-radius:4px; font-weight:bold;">Download Excel File</a></p>
+    </body></html>
+  `).setWidth(420).setHeight(230);
+  SpreadsheetApp.getUi().showModalDialog(html, "Excel Export Complete");
+}
