@@ -2,12 +2,13 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { InvoiceData, InvoiceLineItem, AIConfig } from '../types';
 import { api } from '../services/api';
 import { DocumentViewer } from '../components/DocumentViewer';
-import { LineItemsEditor } from '../components/LineItemsEditor';
+import { LineItemsEditor, isAuthorizedGSTRate } from '../components/LineItemsEditor';
 import { SettingsModal } from '../components/SettingsModal';
 import {
   UploadCloud, FileText, CheckCircle2, AlertTriangle, AlertCircle,
   Download, Settings, RefreshCw, RotateCcw, Trash2, Eye, Table, Check,
-  Search, Filter, ChevronRight, Sparkles, FileSpreadsheet, Plus, ExternalLink
+  Search, Filter, ChevronRight, Sparkles, FileSpreadsheet, Plus, ExternalLink,
+  Loader2
 } from 'lucide-react';
 
 // Standard Indian GSTIN format: 2-digit state code, 10-char PAN, 1-digit entity code, 'Z', 1 checksum char
@@ -68,13 +69,12 @@ const MoneyInput: React.FC<MoneyInputProps> = ({
           }
         }}
         placeholder="0.00"
-        className={`w-full bg-white border ${
-          alertState
+        className={`w-full bg-white border ${alertState
             ? 'border-2 border-red-500 focus:border-red-600 shadow-sm text-sm font-mono font-bold text-red-700 py-2 px-2.5'
             : isGrandTotal
-            ? 'border-2 border-blue-600 focus:border-blue-700 shadow-sm text-sm font-mono font-bold text-blue-700 py-2 px-2.5'
-            : 'border-slate-200 focus:border-blue-600 text-xs font-mono font-semibold py-1.5 px-2.5'
-        } focus:ring-1 ${alertState ? 'focus:ring-red-600' : 'focus:ring-blue-600'} rounded-lg outline-none tracking-tight ${inputColorClass}`}
+              ? 'border-2 border-blue-600 focus:border-blue-700 shadow-sm text-sm font-mono font-bold text-blue-700 py-2 px-2.5'
+              : 'border-slate-200 focus:border-blue-600 text-xs font-mono font-semibold py-1.5 px-2.5'
+          } focus:ring-1 ${alertState ? 'focus:ring-red-600' : 'focus:ring-blue-600'} rounded-lg outline-none tracking-tight ${inputColorClass}`}
       />
     </div>
   );
@@ -90,6 +90,7 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<'split' | 'batch_table'>('split');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number; filename: string } | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null);
@@ -446,14 +447,11 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
       prev.map((inv) => {
         if (inv.id !== id) return inv;
         const items = inv.line_items ?? [];
-        // Same pre-tax/all-tax convention as handleLineItemsChange.
-        const goodsPretaxSum = items
-          .filter((it) => it.line_type !== 'Additional Charge')
-          .reduce((acc, it) => acc + Math.max(0, (it.line_total ?? 0) - (it.tax_amount ?? 0)), 0);
-        const allTaxSum = items.reduce((acc, it) => acc + (it.tax_amount ?? 0), 0);
-        const addl = inv.additional_charges || 0;
-        const disc = inv.discount_amount || 0;
-        const grand = Math.max(0, goodsPretaxSum + allTaxSum + addl - disc);
+        const linesSum = items.reduce((sum, item) => sum + Number(item.line_total || 0), 0);
+        const hasCharges = items.some(
+          (item) => item.line_type === 'Additional Charge' || /loading|freight|transport/i.test(item.description || '')
+        );
+        const grand = hasCharges ? linesSum : linesSum + Number(inv.additional_charges || 0);
         return {
           ...inv,
           total_amount: round2(grand),
@@ -587,10 +585,15 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
     !!currentInvoice && !!originalForCurrentInvoice &&
     JSON.stringify(currentInvoice) !== JSON.stringify(originalForCurrentInvoice);
 
+  const hasInvalidRates = (currentInvoice?.line_items ?? []).some(
+    (item) => !isAuthorizedGSTRate(item.tax_rate_percent)
+  );
+
   const isSubmitBlocked =
-    isNonInvoiceDocument || isAnyDuplicate || hasMissingMandatoryFields || blocksOnDiscrepancy;
+    isNonInvoiceDocument || isAnyDuplicate || hasMissingMandatoryFields || blocksOnDiscrepancy || hasInvalidRates;
 
   const handleSubmitSingleInvoice = async () => {
+    if (isSubmitting) return;
     if (!currentInvoice) return;
     if (isNonInvoiceDocument) {
       showToast(`Submission blocked: This document is classified as a ${DOCUMENT_TYPE_LABELS[currentInvoice.document_type || 'UNKNOWN']}, not a Tax Invoice.`);
@@ -608,6 +611,11 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
       showToast("Submission blocked: Please confirm the arithmetic discrepancy override before submitting.");
       return;
     }
+    if (hasInvalidRates) {
+      showToast("Submission blocked: One or more line items have a non-standard GST rate. Acceptable rates: 0%, 0.05%, 0.1%, 0.25%, 0.5%, 1%, 1.5%, 2.5%, 3%, 5%, 6%, 7.5%, 12%, 18%, 28%, 40%.");
+      return;
+    }
+    setIsSubmitting(true);
     try {
       const invNum = currentInvoice.invoice_number || currentInvoice.file_name;
       showToast(`Submitting invoice ${invNum} to Finance for approval...`);
@@ -618,34 +626,56 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
         is_reviewed: true
       };
 
-      await api.saveInvoice(invoiceToSave);
+      const res = await api.saveInvoice(invoiceToSave);
 
-      // Real-time sync: Append saved record to frontend state
-      setExistingGSheetRecords((prev) => [
-        ...prev,
-        {
-          'Invoice No': invoiceToSave.invoice_number,
-          'Merchant': invoiceToSave.vendor_name,
-          'Vendor GSTIN': invoiceToSave.vendor_tax_id,
-          'Total Amount': invoiceToSave.total_amount
-        }
-      ]);
+      if (res && (res.status === 'ok' || res.status === 'success' || !res.status)) {
+        // Real-time sync: Append saved record to frontend state
+        setExistingGSheetRecords((prev) => [
+          ...prev,
+          {
+            'Invoice No': invoiceToSave.invoice_number,
+            'Merchant': invoiceToSave.vendor_name,
+            'Vendor GSTIN': invoiceToSave.vendor_tax_id,
+            'Total Amount': invoiceToSave.total_amount
+          }
+        ]);
 
-      const targetId = currentInvoice.id;
-      const remaining = invoices.filter((inv) => inv.id !== targetId);
-      setInvoices(remaining);
-      setSelectedIds((prev) => prev.filter((id) => id !== targetId));
+        const targetId = currentInvoice.id;
+        setInvoices((prev) => {
+          const remaining = prev.filter((inv) => inv.id !== targetId);
+          if (remaining.length > 0) {
+            const nextPending = remaining.find((inv) => !inv.is_reviewed) || remaining[0];
+            setSelectedInvoiceId(nextPending.id);
+          } else {
+            setSelectedInvoiceId(null);
+          }
+          return remaining;
+        });
+        setSelectedIds((prev) => prev.filter((id) => id !== targetId));
 
-      if (remaining.length > 0) {
-        const nextPending = remaining.find((inv) => !inv.is_reviewed) || remaining[0];
-        setSelectedInvoiceId(nextPending.id);
-      } else {
-        setSelectedInvoiceId(null);
+        showToast(`Invoice ${invNum} submitted to GSheet and removed from queue!`);
       }
-
-      showToast(`Invoice ${invNum} submitted to GSheet and removed from queue!`);
     } catch (err: any) {
-      showToast(`Failed to submit invoice: ${getFriendlyErrorMessage(err, 'save')}`);
+      const errMsg = String(err?.message || '');
+      if (errMsg.toLowerCase().includes('already exists') || errMsg.toLowerCase().includes('duplicate invoice')) {
+        const targetId = currentInvoice.id;
+        setInvoices((prev) => {
+          const remaining = prev.filter((inv) => inv.id !== targetId);
+          if (remaining.length > 0) {
+            const nextPending = remaining.find((inv) => !inv.is_reviewed) || remaining[0];
+            setSelectedInvoiceId(nextPending.id);
+          } else {
+            setSelectedInvoiceId(null);
+          }
+          return remaining;
+        });
+        setSelectedIds((prev) => prev.filter((id) => id !== targetId));
+        showToast(`Invoice ${invNum} is already recorded in Google Sheets and has been cleared from queue.`);
+      } else {
+        showToast(`Failed to submit invoice: ${getFriendlyErrorMessage(err, 'save')}`);
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -820,7 +850,7 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
       (inv.invoice_number || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
       (inv.vendor_name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
       (inv.file_name || '').toLowerCase().includes(searchTerm.toLowerCase());
-    
+
     if (!matchesSearch) return false;
     if (confidenceFilter === 'all') return true;
     if (confidenceFilter === 'high') return inv.confidence_level === 'High';
@@ -843,13 +873,18 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
   // Comparing raw tax-inclusive line totals directly against Grand Total, or
   // re-adding a charge row's own tax on top of additional_charges, both produce
   // false mismatches whenever an invoice carries taxed shipping/freight charges.
-  const currentGoodsPretaxSum = (currentInvoice?.line_items ?? [])
-    .filter((item) => item.line_type !== 'Additional Charge')
-    .reduce((acc, item) => acc + Math.max(0, (item.line_total || 0) - (item.tax_amount || 0)), 0);
-  const currentAllLinesTaxSum = (currentInvoice?.line_items ?? []).reduce((acc, item) => acc + (item.tax_amount || 0), 0);
-  const currentExpectedTotal = currentGoodsPretaxSum + currentAllLinesTaxSum + (currentInvoice?.additional_charges || 0) - (currentInvoice?.discount_amount || 0);
-  const currentGrandTotal = currentInvoice?.total_amount || 0;
-  const isReconciliationMismatch = !!currentInvoice && Math.abs(currentExpectedTotal - currentGrandTotal) > 0.05 && (currentInvoice.line_items?.length ?? 0) > 0;
+  const totalOfLines = (currentInvoice?.line_items ?? []).reduce(
+    (sum, item) => sum + Number(item.line_total || 0), 0
+  );
+  const grandTotal = Number(currentInvoice?.total_amount || 0);
+  const hasChargeInLines = (currentInvoice?.line_items ?? []).some(
+    (item) => item.line_type === 'Additional Charge' || /loading|freight|transport/i.test(item.description || '')
+  );
+  const effectiveTotal = hasChargeInLines ? totalOfLines : totalOfLines + Number(currentInvoice?.additional_charges || 0);
+
+  const isReconciliationMismatch = !!currentInvoice &&
+    (Math.abs(grandTotal - effectiveTotal) > 1.00 || hasInvalidRates) &&
+    (currentInvoice.line_items?.length ?? 0) > 0;
 
   return (
     <div className="space-y-5 max-w-[1600px] mx-auto pb-32 text-slate-900">
@@ -906,11 +941,10 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
               <button
                 type="button"
                 onClick={() => setViewMode('split')}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition flex items-center gap-1.5 ${
-                  viewMode === 'split'
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition flex items-center gap-1.5 ${viewMode === 'split'
                     ? 'bg-white text-slate-950 border border-slate-200/50 shadow-sm font-bold'
                     : 'text-slate-50 hover:text-slate-800'
-                }`}
+                  }`}
               >
                 <Eye className="w-3.5 h-3.5" />
                 Split Review
@@ -918,11 +952,10 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
               <button
                 type="button"
                 onClick={() => setViewMode('batch_table')}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition flex items-center gap-1.5 ${
-                  viewMode === 'batch_table'
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition flex items-center gap-1.5 ${viewMode === 'batch_table'
                     ? 'bg-white text-slate-950 border border-slate-200/50 shadow-sm font-bold'
                     : 'text-slate-50 hover:text-slate-800'
-                }`}
+                  }`}
               >
                 <Table className="w-3.5 h-3.5" />
                 Batch Table ({invoices.length})
@@ -1014,11 +1047,10 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
       <div
         onDragOver={handleDragOver}
         onDrop={handleDrop}
-        className={`border-2 border-dashed rounded-lg transition-all duration-200 text-center ${
-          invoices.length === 0
+        className={`border-2 border-dashed rounded-lg transition-all duration-200 text-center ${invoices.length === 0
             ? 'p-10 bg-white border-slate-300 hover:border-[#0A2558]/50 hover:bg-[#0A2558]/[0.02]'
             : 'p-4 bg-white border-slate-200 hover:border-[#0A2558]/40 hover:bg-slate-50'
-        }`}
+          }`}
       >
         <input
           type="file"
@@ -1040,7 +1072,7 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
             </div>
           </div>
         ) : invoices.length === 0 ? (
-          <div className="max-w-xl mx-auto space-y-4">
+          <div className="max-w-xl mx-auto space-y-4 py-2">
             <div className="w-14 h-14 rounded-2xl bg-[#0A2558]/5 border border-[#0A2558]/15 text-[#0A2558] flex items-center justify-center mx-auto shadow-sm transition-colors">
               <UploadCloud className="w-7 h-7" />
             </div>
@@ -1049,7 +1081,7 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                 Upload Single or Batch Invoices
               </h2>
               <p className="text-xs text-slate-500 mt-1">
-                Drag and drop your PDF invoices, scanned images (JPG, PNG), or multi-page documents here.
+                Drag and drop your PDF invoices, scanned images (JPG, PNG), or multi-page documents here to start a new batch.
               </p>
             </div>
             <div className="flex items-center justify-center gap-3 pt-2">
@@ -1108,15 +1140,14 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                   key={inv.id}
                   type="button"
                   onClick={() => setSelectedInvoiceId(inv.id)}
-                  className={`px-3 py-1.5 rounded border text-left shrink-0 transition flex items-center gap-2.5 ${
-                    isSelected
+                  className={`px-3 py-1.5 rounded border text-left shrink-0 transition flex items-center gap-2.5 ${isSelected
                       ? isDup
                         ? 'bg-red-50 border-red-500 text-red-950 shadow-sm'
                         : 'bg-slate-100 border-blue-650 text-slate-900 shadow-sm'
                       : isDup
-                      ? 'bg-red-50/50 border-red-200 text-red-900 hover:border-red-300'
-                      : 'bg-white border-slate-200 text-slate-500 hover:text-slate-900 hover:border-slate-400'
-                  }`}
+                        ? 'bg-red-50/50 border-red-200 text-red-900 hover:border-red-300'
+                        : 'bg-white border-slate-200 text-slate-500 hover:text-slate-900 hover:border-slate-400'
+                    }`}
                 >
                   <div className="text-xs font-mono font-bold text-slate-400">
                     #{idx + 1}
@@ -1138,13 +1169,12 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                     </span>
                   ) : (
                     <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${
-                        inv.confidence_level === 'High'
+                      className={`w-2 h-2 rounded-full shrink-0 ${inv.confidence_level === 'High'
                           ? 'bg-emerald-500'
                           : inv.confidence_level === 'Medium'
-                          ? 'bg-amber-500'
-                          : 'bg-rose-500'
-                      }`}
+                            ? 'bg-amber-500'
+                            : 'bg-rose-500'
+                        }`}
                       title={`Confidence: ${inv.confidence_level}`}
                     />
                   )}
@@ -1172,13 +1202,12 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                 <div className="p-4 rounded-lg bg-white border border-slate-200 flex flex-wrap items-center justify-between gap-3 shadow-sm">
                   <div className="flex items-center gap-3">
                     <div
-                      className={`px-2.5 py-1 rounded border text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 ${
-                        currentInvoice.confidence_level === 'High'
+                      className={`px-2.5 py-1 rounded border text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 ${currentInvoice.confidence_level === 'High'
                           ? 'bg-emerald-50 text-emerald-700 border-emerald-200/50'
                           : currentInvoice.confidence_level === 'Medium'
-                          ? 'bg-amber-50 text-amber-700 border-amber-200/50'
-                          : 'bg-rose-50 text-rose-700 border-rose-200/50'
-                      }`}
+                            ? 'bg-amber-50 text-amber-700 border-amber-200/50'
+                            : 'bg-rose-50 text-rose-700 border-rose-200/50'
+                        }`}
                     >
                       <Sparkles className="w-3 h-3" />
                       {Math.round(currentInvoice.overall_confidence * 100)}% {currentInvoice.confidence_level} Confidence
@@ -1194,11 +1223,10 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                       onClick={() =>
                         handleInvoiceChange(currentInvoice.id, 'is_reviewed', !currentInvoice.is_reviewed)
                       }
-                      className={`px-3 py-1.5 text-xs font-bold rounded border transition flex items-center gap-1.5 ${
-                        currentInvoice.is_reviewed
+                      className={`px-3 py-1.5 text-xs font-bold rounded border transition flex items-center gap-1.5 ${currentInvoice.is_reviewed
                           ? 'bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700 shadow-sm'
                           : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-                      }`}
+                        }`}
                     >
                       <Check className="w-3.5 h-3.5" />
                       {currentInvoice.is_reviewed ? 'Reviewed & Verified' : 'Mark Reviewed'}
@@ -1207,11 +1235,10 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                       type="button"
                       onClick={() => handleResetToOriginal(currentInvoice.id)}
                       disabled={!isCurrentInvoiceModified}
-                      className={`px-3 py-1.5 text-xs font-bold rounded border transition flex items-center gap-1.5 ${
-                        isCurrentInvoiceModified
+                      className={`px-3 py-1.5 text-xs font-bold rounded border transition flex items-center gap-1.5 ${isCurrentInvoiceModified
                           ? 'text-amber-700 bg-amber-50 hover:bg-amber-100 border-amber-200'
                           : 'text-slate-300 bg-slate-50 border-slate-200 cursor-not-allowed'
-                      }`}
+                        }`}
                       title={isCurrentInvoiceModified ? 'Discard edits and restore the original OCR extraction' : 'No edits to reset'}
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
@@ -1637,11 +1664,12 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
 
                   {/* Reconciliation Banner */}
                   <div
-                    className={`p-3 rounded-lg border flex items-center justify-between gap-3 text-xs ${
-                      !isReconciliationMismatch
+                    className={`p-3 rounded-lg border flex items-center justify-between gap-3 text-xs ${!isReconciliationMismatch
                         ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                        : 'bg-amber-50 border-amber-200 text-amber-800'
-                    }`}
+                        : hasInvalidRates
+                          ? 'bg-rose-50 border-rose-200 text-rose-800'
+                          : 'bg-amber-50 border-amber-200 text-amber-800'
+                      }`}
                   >
                     <div className="flex items-center gap-2">
                       {!isReconciliationMismatch ? (
@@ -1651,17 +1679,24 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                             Total matches line items sum. Ready to save.
                           </span>
                         </>
+                      ) : hasInvalidRates ? (
+                        <>
+                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                          <span className="font-semibold">
+                            One or more line items have a non-standard GST rate. Acceptable rates: 0%, 0.05%, 0.1%, 0.25%, 0.5%, 1%, 1.5%, 2.5%, 3%, 5%, 6%, 7.5%, 12%, 18%, 28%, 40%.
+                          </span>
+                        </>
                       ) : (
                         <>
                           <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
                           <span className="font-semibold">
-                            Grand Total ({currentInvoice.currency_symbol}{(currentInvoice.total_amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) differs from Line Items + Charges ({currentInvoice.currency_symbol}{currentExpectedTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).
+                            Grand Total ({currentInvoice.currency_symbol}{(currentInvoice.total_amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) differs from Line Items + Charges ({currentInvoice.currency_symbol}{effectiveTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).
                           </span>
                         </>
                       )}
                     </div>
 
-                    {isReconciliationMismatch && (
+                    {isReconciliationMismatch && !hasInvalidRates && (
                       <button
                         type="button"
                         onClick={() => handleRecalculateGrandTotal(currentInvoice.id)}
@@ -1734,17 +1769,28 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                     <button
                       type="button"
                       onClick={handleSubmitSingleInvoice}
-                      disabled={isSubmitBlocked}
-                      className={`flex-1 py-2.5 text-xs font-bold rounded-md transition-all flex items-center justify-center gap-1.5 shadow-sm ${
-                        isSubmitBlocked
-                          ? 'bg-red-100 text-red-700 border border-red-300 cursor-not-allowed shadow-none'
-                          : 'bg-blue-600 hover:bg-blue-700 text-white'
-                      }`}
+                      disabled={isSubmitBlocked || isSubmitting}
+                      className={`flex-1 py-2.5 text-xs font-bold rounded-md transition-all flex items-center justify-center gap-1.5 shadow-sm ${isSubmitting
+                          ? 'bg-blue-600 text-white opacity-50 cursor-not-allowed'
+                          : isSubmitBlocked
+                            ? 'bg-red-100 text-red-700 border border-red-300 cursor-not-allowed shadow-none'
+                            : 'bg-blue-600 hover:bg-blue-700 text-white'
+                        }`}
                     >
-                      {hasMissingMandatoryFields ? (
+                      {isSubmitting ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Pushing to Sheet...</span>
+                        </>
+                      ) : hasMissingMandatoryFields ? (
                         <>
                           <AlertCircle className="w-4 h-4 text-red-600" />
                           <span>Missing Required Fields</span>
+                        </>
+                      ) : hasInvalidRates ? (
+                        <>
+                          <AlertCircle className="w-4 h-4 text-red-600" />
+                          <span>Invalid GST Rate(s)</span>
                         </>
                       ) : blocksOnDiscrepancy ? (
                         <>
@@ -1872,9 +1918,8 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                   filteredInvoices.map((inv) => (
                     <tr
                       key={inv.id}
-                      className={`hover:bg-slate-50 transition ${
-                        selectedIds.includes(inv.id) ? 'bg-slate-50/50' : ''
-                      }`}
+                      className={`hover:bg-slate-50 transition ${selectedIds.includes(inv.id) ? 'bg-slate-50/50' : ''
+                        }`}
                     >
                       <td className="py-2.5 px-3 text-center">
                         <input
@@ -1915,24 +1960,22 @@ export const InvoiceExtractionView: React.FC<InvoiceExtractionViewProps> = ({ sh
                       </td>
                       <td className="py-2.5 px-3 text-center">
                         <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${
-                            inv.confidence_level === 'High'
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${inv.confidence_level === 'High'
                               ? 'bg-emerald-50 text-emerald-700 border-emerald-250/50'
                               : inv.confidence_level === 'Medium'
-                              ? 'bg-amber-50 text-amber-700 border-amber-250/50'
-                              : 'bg-rose-50 text-rose-700 border-rose-250/50'
-                          }`}
+                                ? 'bg-amber-50 text-amber-700 border-amber-250/50'
+                                : 'bg-rose-50 text-rose-700 border-rose-250/50'
+                            }`}
                         >
                           {inv.confidence_level}
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-center">
                         <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            inv.is_reviewed
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${inv.is_reviewed
                               ? 'bg-emerald-55 text-emerald-800 border border-emerald-200/50'
                               : 'bg-slate-100 text-slate-500 border border-slate-200'
-                          }`}
+                            }`}
                         >
                           {inv.is_reviewed ? 'Reviewed' : 'Pending'}
                         </span>

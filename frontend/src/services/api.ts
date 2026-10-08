@@ -177,7 +177,7 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(invoice),
-    }, 15_000);
+    }, 45_000);
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Failed to save and sync invoice' }));
       throw new Error(err.detail || 'Failed to save and sync invoice');
@@ -192,7 +192,7 @@ export const api = {
    * `results` per-invoice rather than treating this as pass/fail for the whole batch.
    */
   async batchSaveInvoices(invoices: InvoiceData[]): Promise<BatchSaveResponse> {
-    const timeoutMs = Math.min(180_000, 30_000 + invoices.length * 10_000);
+    const timeoutMs = Math.max(45_000, Math.min(180_000, 45_000 + invoices.length * 15_000));
     const res = await fetchWithTimeout(`${API_BASE}/invoices/batch-save`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -266,7 +266,7 @@ export const api = {
   },
 
   async clearGSheetRecords(): Promise<{ status: string; message?: string }> {
-    const res = await fetchWithTimeout(`${API_BASE}/gsheet/clear`, { method: 'POST' }, 10_000);
+    const res = await fetchWithTimeout(`${API_BASE}/gsheet/clear`, { method: 'POST' }, 20_000);
     if (!res.ok) throw new Error('Failed to clear database');
     return res.json();
   },

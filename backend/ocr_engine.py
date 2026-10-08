@@ -25,8 +25,8 @@ _backend_env = Path(__file__).resolve().parent / ".env"
 def reload_env_vars():
     """Actively reload environment variables from .env files with priority."""
     candidates = [
-        _root_env,
         _backend_env,
+        _root_env,
         Path.cwd() / ".env",
     ]
     try:
@@ -40,6 +40,8 @@ def reload_env_vars():
         if p.exists() and p.is_file():
             load_dotenv(dotenv_path=p, override=True)
     load_dotenv(override=True)
+    if not os.getenv("GEMINI_API_KEY") and _root_env.exists():
+        load_dotenv(dotenv_path=_root_env, override=True)
 
 reload_env_vars()
 
@@ -399,107 +401,358 @@ def parse_float_safe(val: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
+AUTHORIZED_GST_SLABS = [0.0, 0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.5, 3.0, 5.0, 6.0, 7.5, 12.0, 18.0, 28.0, 40.0]
+GST_SLABS = AUTHORIZED_GST_SLABS
+
+def snap_gst_rate(rate: Optional[float], tolerance: float = 1.5) -> float:
+    if rate is None:
+        return 0.0
+    try:
+        r = float(rate)
+    except (ValueError, TypeError):
+        return 0.0
+    if r <= 0:
+        return 0.0
+    # Specifically trap and correct the tax / grand_total inversion (14.5% - 16.0%)
+    if 14.5 <= r <= 16.0:
+        return 18.0
+    closest = min(AUTHORIZED_GST_SLABS, key=lambda s: abs(s - r))
+    if abs(closest - r) <= tolerance:
+        return float(closest)
+    return round(r, 2)
+
+def normalize_date_to_iso(val: Any) -> Optional[str]:
+    """Normalizes date string to YYYY-MM-DD, converting 2-digit years (e.g. 15/8/26 -> 2026-08-15)."""
+    if not val:
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in ("null", "none", "not available", "—", "-"):
+        return None
+    m_iso = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})$', s)
+    if m_iso:
+        y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+        return f"{y:04d}-{m:02d}-{d:02d}"
+
+    m_dmy2 = re.match(r'^(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2})$', s)
+    if m_dmy2:
+        d, m, y = int(m_dmy2.group(1)), int(m_dmy2.group(2)), int(m_dmy2.group(3))
+        full_y = 2000 + y if y < 70 else 1900 + y
+        if m > 12 >= d:
+            d, m = m, d
+        return f"{full_y:04d}-{m:02d}-{d:02d}"
+
+    m_dmy4 = re.match(r'^(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{4})$', s)
+    if m_dmy4:
+        d, m, y = int(m_dmy4.group(1)), int(m_dmy4.group(2)), int(m_dmy4.group(3))
+        if m > 12 >= d:
+            d, m = m, d
+        return f"{y:04d}-{m:02d}-{d:02d}"
+
+    m_ymd = re.match(r'^(\d{4})[/\-\.](\d{1,2})[/\-\.](\d{1,2})$', s)
+    if m_ymd:
+        y, m, d = int(m_ymd.group(1)), int(m_ymd.group(2)), int(m_ymd.group(3))
+        return f"{y:04d}-{m:02d}-{d:02d}"
+
+    return s
+
+def classify_gst_regime(
+    tax_breakdown: Optional[List[Any]] = None,
+    cgst: float = 0.0,
+    sgst: float = 0.0,
+    igst: float = 0.0,
+    vendor_tax_id: Optional[str] = None,
+    client_tax_id: Optional[str] = None,
+) -> str:
+    """
+    Tax Regime Classification:
+    Priority 1 (Footer Summary): If footer specifies "IGST", set regime = "IGST".
+                                If footer specifies "CGST" / "SGST", set regime = "CGST_SGST".
+    Priority 2 (State Code Comparison): If Supplier GSTIN state code != Buyer/POS state code -> "IGST";
+                                       otherwise -> "CGST_SGST".
+    """
+    footer_has_igst = igst > 0
+    footer_has_cgst_sgst = (cgst > 0 or sgst > 0)
+
+    if tax_breakdown:
+        for tb in tax_breakdown:
+            t_type = (getattr(tb, "tax_type", None) or (tb.get("tax_type") if isinstance(tb, dict) else "") or "").upper()
+            t_amt = getattr(tb, "tax_amount", None) if not isinstance(tb, dict) else tb.get("tax_amount")
+            amt = float(t_amt or 0.0) if t_amt is not None else 0.0
+            if "IGST" in t_type and amt > 0:
+                footer_has_igst = True
+            elif ("CGST" in t_type or "SGST" in t_type) and amt > 0:
+                footer_has_cgst_sgst = True
+
+    # Priority 1: Footer Summary
+    if footer_has_igst and not footer_has_cgst_sgst:
+        return "IGST"
+    if footer_has_cgst_sgst and not footer_has_igst:
+        return "CGST_SGST"
+    if footer_has_igst and footer_has_cgst_sgst:
+        return "IGST" if igst >= (cgst + sgst) else "CGST_SGST"
+
+    # Priority 2: State Code Comparison
+    v_gst = (vendor_tax_id or "").strip()
+    c_gst = (client_tax_id or "29AAACS1234K1Z8").strip()
+    if len(v_gst) >= 2 and len(c_gst) >= 2:
+        v_state = v_gst[:2]
+        c_state = c_gst[:2]
+        if v_state != c_state:
+            return "IGST"
+        else:
+            return "CGST_SGST"
+
+    return "CGST_SGST"
+
+def extract_footer_rate(
+    tax_breakdown: Optional[List[Any]] = None,
+    raw_ocr_response: Optional[Dict[str, Any]] = None,
+    total_footer_tax: float = 0.0,
+    total_taxable_base: float = 0.0,
+) -> float:
+    """Extracts or deduces the effective footer GST rate."""
+    if tax_breakdown:
+        breakdown_rates = []
+        cgst_rate = sgst_rate = igst_rate = 0.0
+        for tb in tax_breakdown:
+            t_type = (getattr(tb, "tax_type", None) or (tb.get("tax_type") if isinstance(tb, dict) else "") or "").upper()
+            t_rate = getattr(tb, "rate_percent", None) if not isinstance(tb, dict) else tb.get("rate_percent")
+            rate = float(t_rate or 0.0) if t_rate is not None else 0.0
+            if "IGST" in t_type and rate > 0:
+                igst_rate = rate
+            elif "CGST" in t_type and rate > 0:
+                cgst_rate = rate
+            elif "SGST" in t_type and rate > 0:
+                sgst_rate = rate
+            elif rate > 0:
+                breakdown_rates.append(rate)
+
+        if igst_rate > 0:
+            return snap_gst_rate(igst_rate)
+        if cgst_rate > 0 or sgst_rate > 0:
+            return snap_gst_rate(cgst_rate + sgst_rate)
+        if breakdown_rates:
+            return snap_gst_rate(breakdown_rates[0])
+
+    if raw_ocr_response and isinstance(raw_ocr_response, dict):
+        for k in ("tax_rate", "gst_rate", "tax_rate_percent", "rate_percent"):
+            val = raw_ocr_response.get(k)
+            if val is not None:
+                try:
+                    r = float(val)
+                    if r > 0:
+                        return snap_gst_rate(r)
+                except (ValueError, TypeError):
+                    pass
+
+    if total_footer_tax > 0 and total_taxable_base > 0:
+        return snap_gst_rate((total_footer_tax / total_taxable_base) * 100.0)
+
+    return 0.0
+
 def back_allocate_footer_tax_to_line_items(
     line_items: List[InvoiceLineItem],
     tax_amount: Optional[float],
     tax_breakdown: List[TaxBreakdownItem],
     discount_amount: float = 0.0,
+    subtotal: Optional[float] = None,
+    total_amount: Optional[float] = None,
+    pricing_is_inclusive: bool = False,
+    vendor_tax_id: Optional[str] = None,
+    client_tax_id: Optional[str] = None,
+    raw_ocr_response: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[InvoiceLineItem], bool]:
     """
-    Many supplier invoices declare CGST/SGST/IGST only in a footer summary table,
-    leaving individual line items untaxed (tax_rate_percent/tax_amount blank or 0
-    and line_total equal to the pre-tax base amount). Left as-is, the sum of line
-    totals will never match the tax-inclusive Grand Total, producing a false
-    reconciliation mismatch.
-
-    This back-allocates the footer tax onto each line item that has no tax of its
-    own: items sharing an HSN/SAC code with an already-taxed item inherit that
-    item's rate, and any remainder is split proportionally by each item's pre-tax
-    base amount so the allocated amounts always sum exactly to the footer total.
-
-    `discount_amount` (an invoice-level discount not tied to any specific line) is
-    used ONLY to correct the *reported* tax_rate_percent on proportionally-allocated
-    items — dividing footer tax by the gross, pre-discount base understates the true
-    statutory rate (e.g. reports 11.04% instead of 12% when an invoice with subtotal
-    18,800 carries a 1,504 discount, since 2075.52/18800 != 2075.52/17296). The
-    dollar amount allocated to each item is untouched by this and still sums exactly
-    to the footer total regardless of any discount.
-
-    Returns the (possibly updated) line items and whether any allocation occurred.
+    Deterministic 4-Tier Tax Calculation Waterfall for AP Invoice Line Items:
+    Processes each line item sequentially through Tier 1 -> Tier 2 -> Tier 3 -> Tier 4.
     """
     if not line_items:
         return line_items, False
 
-    footer_tax_total = tax_amount if tax_amount and tax_amount > 0 else None
-    if footer_tax_total is None:
-        breakdown_sum = sum(tb.tax_amount or 0.0 for tb in tax_breakdown)
-        footer_tax_total = breakdown_sum if breakdown_sum > 0 else None
-    if footer_tax_total is None:
-        return line_items, False
+    cgst = sgst = igst = cess = 0.0
+    for tb in (tax_breakdown or []):
+        t_type = str(getattr(tb, "tax_type", "") or (tb.get("tax_type") if isinstance(tb, dict) else "")).upper()
+        t_amt = getattr(tb, "tax_amount", 0.0) if not isinstance(tb, dict) else tb.get("tax_amount")
+        t_amt = float(t_amt or 0.0)
+        if "CGST" in t_type:
+            cgst = t_amt
+        elif "SGST" in t_type:
+            sgst = t_amt
+        elif "IGST" in t_type:
+            igst = t_amt
+        elif "CESS" in t_type:
+            cess = t_amt
 
-    def base_amount(item: InvoiceLineItem) -> float:
-        if item.line_total is not None:
-            return max(0.0, item.line_total)
-        qty = item.quantity or 0.0
-        price = item.unit_price or 0.0
-        disc = item.discount or 0.0
-        return max(0.0, qty * price - disc)
+    if cgst == 0.0 and sgst == 0.0 and igst == 0.0 and raw_ocr_response and isinstance(raw_ocr_response, dict):
+        cgst = float(raw_ocr_response.get("cgst") or 0.0)
+        sgst = float(raw_ocr_response.get("sgst") or 0.0)
+        igst = float(raw_ocr_response.get("igst") or 0.0)
 
-    has_tax = lambda item: bool(item.tax_amount) and item.tax_amount > 0
-    untaxed = [it for it in line_items if not has_tax(it)]
-    if not untaxed:
-        return line_items, False
+    total_footer_tax = cgst + sgst + igst + cess
+    if total_footer_tax == 0.0 and tax_amount:
+        total_footer_tax = float(tax_amount)
 
-    already_allocated = sum(it.tax_amount or 0.0 for it in line_items if has_tax(it))
-    remaining_tax = round(footer_tax_total - already_allocated, 2)
+    resolved_line_types = classify_line_types(line_items)
 
-    bases = {id(it): base_amount(it) for it in untaxed}
-    total_base = sum(bases.values())
-    if remaining_tax <= 0 or total_base <= 0:
-        return line_items, False
+    def _item_base(it: InvoiceLineItem) -> float:
+        if it.unit_price is not None and it.quantity is not None:
+            return round((it.quantity * it.unit_price) - (it.discount or 0.0), 2)
+        elif it.line_total is not None and it.tax_amount is not None and it.line_total > it.tax_amount:
+            return round(it.line_total - it.tax_amount, 2)
+        elif it.line_total is not None:
+            return round(it.line_total, 2)
+        elif it.unit_price is not None:
+            return round(it.unit_price, 2)
+        return 0.0
 
-    # Net-of-discount base used ONLY as the rate denominator (never for the dollar
-    # allocation above/below). Guards against bad data (a discount at or above the
-    # full gross base) by falling back to the gross base rather than dividing by
-    # zero or inverting the rate.
-    net_taxable_base = total_base - (discount_amount or 0.0)
-    if net_taxable_base <= 0:
-        net_taxable_base = total_base
-    discount_scale = (net_taxable_base / total_base) if total_base > 0 else 1.0
-
-    hsn_rate_map: Dict[str, float] = {}
-    for it in line_items:
-        if has_tax(it) and it.hsn_sac and it.tax_rate_percent:
-            hsn_rate_map[it.hsn_sac.strip().upper()] = it.tax_rate_percent
-
-    allocated_sum = 0.0
-    for idx, item in enumerate(untaxed):
-        base = bases[id(item)]
-        is_last = idx == len(untaxed) - 1
-        hsn_key = (item.hsn_sac or "").strip().upper()
-        used_hsn_rate = (not is_last) and bool(hsn_key) and hsn_key in hsn_rate_map
-
-        if used_hsn_rate:
-            item_tax = round(base * hsn_rate_map[hsn_key] / 100.0, 2)
-        elif not is_last:
-            item_tax = round(remaining_tax * (base / total_base), 2)
+    # 1. If an explicit subtotal exists and is less than grand_total, that IS the pre-tax base.
+    if subtotal and total_amount and 0 < subtotal < total_amount:
+        sum_taxable = float(subtotal)
+    elif subtotal and subtotal > 0 and (not total_amount or abs(subtotal - total_amount) > 1.0):
+        sum_taxable = float(subtotal)
+    else:
+        raw_sum = sum(
+            max(0.0, _item_base(it))
+            for it, lt in zip(line_items, resolved_line_types)
+            if lt not in ("Discount", "Round Off")
+        )
+        # If raw item sum equals grand_total and footer tax exists, raw_sum is GROSS, not taxable base!
+        if total_amount and total_footer_tax and abs(raw_sum - total_amount) <= max(1.0, total_amount * 0.01):
+            sum_taxable = float(total_amount - total_footer_tax)
         else:
-            # Final item absorbs any rounding remainder so the allocation is exact.
-            item_tax = round(remaining_tax - allocated_sum, 2)
+            sum_taxable = raw_sum if raw_sum > 0 else float(subtotal or 0.0)
 
-        allocated_sum += item_tax
-        item.tax_amount = item_tax
-        if used_hsn_rate:
-            # Rate was already known (inherited from an already-taxed sibling, itself
-            # from the model's own extraction) — report it as-is, it was never
-            # derived from the gross base and needs no discount adjustment.
-            item.tax_rate_percent = hsn_rate_map[hsn_key]
-        else:
-            rate_base = base * discount_scale
-            item.tax_rate_percent = round((item_tax / rate_base) * 100.0, 2) if rate_base > 0 else 0.0
-        item.line_total = round(base + item_tax, 2)
+    footer_rate = extract_footer_rate(
+        tax_breakdown,
+        raw_ocr_response,
+        total_footer_tax=total_footer_tax,
+        total_taxable_base=sum_taxable,
+    )
 
-    return line_items, True
+    raw_sum = round(sum(
+        (it.line_total if it.line_total is not None else _item_base(it))
+        for it in line_items
+    ), 2)
+    tol = max(1.0, (total_amount or 0.0) * 0.01)
+    matches_grand = total_amount is not None and abs(raw_sum - total_amount) <= tol
+
+    tax_was_allocated = False
+
+    for item, line_type in zip(line_items, resolved_line_types):
+        desc = item.description or ""
+        is_discount = (
+            line_type == "Discount"
+            or bool(_LINE_ITEM_DISCOUNT_PATTERN.search(desc))
+            or (item.line_total is not None and item.line_total < 0)
+            or (item.unit_price is not None and item.unit_price < 0)
+        )
+        is_round_off = (
+            line_type == "Round Off"
+            or bool(_LINE_ITEM_ROUND_OFF_PATTERN.search(desc))
+        )
+
+        if is_round_off:
+            item.tax_rate_percent = 0.0
+            item.tax_amount = 0.0
+            continue
+
+        if is_discount:
+            # Strictly negative polarity: val = -abs(val)
+            if item.unit_price is not None:
+                item.unit_price = -abs(item.unit_price)
+            if item.tax_amount is not None and item.tax_amount != 0:
+                item.tax_amount = -abs(item.tax_amount)
+            if item.line_total is not None:
+                item.line_total = -abs(item.line_total)
+            continue
+
+        taxable_amount = _item_base(item)
+        l_rate = item.tax_rate_percent
+        l_total = item.line_total
+
+        # Tier 1: Itemized Bill (Explicit Rate & Taxable Amount Present)
+        if l_rate is not None and l_rate > 0 and taxable_amount > 0:
+            rate = snap_gst_rate(l_rate)
+            if l_total is not None and l_total > taxable_amount and abs(taxable_amount * (1.0 + rate / 100.0) - l_total) <= max(1.0, l_total * 0.01):
+                item.tax_rate_percent = rate
+                item.tax_amount = round(l_total - taxable_amount, 2)
+                item.line_total = round(l_total, 2)
+            else:
+                t_amt = round(taxable_amount * (rate / 100.0), 2)
+                item.tax_rate_percent = rate
+                item.tax_amount = t_amt
+                item.line_total = round(taxable_amount + t_amt, 2)
+            tax_was_allocated = True
+
+        # Tier 2: Pre-Tax Base + Gross Line Total Present (The S.R. AGENCIES Pattern)
+        elif (
+            taxable_amount > 0
+            and l_total is not None
+            and l_total > 0
+            and round(l_total, 2) > round(taxable_amount, 2)
+            and (l_rate is None or l_rate <= 0)
+        ):
+            t_amt = round(l_total - taxable_amount, 2)
+            raw_rate = (t_amt / taxable_amount) * 100.0
+            rate = snap_gst_rate(raw_rate)
+            item.tax_amount = t_amt
+            item.tax_rate_percent = rate
+            item.line_total = round(l_total, 2)
+            tax_was_allocated = True
+
+        # Tier 3: Gross Total Only (Inclusive Pricing / Retail Format)
+        elif (
+            l_total is not None
+            and l_total > 0
+            and footer_rate > 0
+            and (
+                taxable_amount <= 0
+                or pricing_is_inclusive
+                or (matches_grand and abs(taxable_amount - l_total) <= 0.01)
+            )
+        ):
+            rate = snap_gst_rate(footer_rate)
+            taxable_base = round(l_total / (1.0 + (rate / 100.0)), 2)
+            t_amt = round(l_total - taxable_base, 2)
+            item.unit_price = taxable_base
+            item.tax_amount = t_amt
+            item.tax_rate_percent = rate
+            item.line_total = round(l_total, 2)
+            tax_was_allocated = True
+
+        # Tier 4: Multi-Item Proportional Footer Apportionment
+        elif total_footer_tax > 0 and taxable_amount > 0 and sum_taxable > 0:
+            weight = taxable_amount / sum_taxable
+            t_amt = round(total_footer_tax * weight, 2)
+            raw_rate = (total_footer_tax / sum_taxable) * 100.0
+            rate = snap_gst_rate(raw_rate)
+            item.tax_amount = t_amt
+            item.tax_rate_percent = rate
+            item.line_total = round(taxable_amount + t_amt, 2)
+            tax_was_allocated = True
+
+    # Paisa Reconciliation: Check sum(line_tax) vs total_footer_tax <= 0.05
+    if total_footer_tax > 0:
+        net_line_tax = round(sum(
+            (it.tax_amount or 0.0)
+            for it in line_items
+            if (it.line_type or "") != "Round Off"
+        ), 2)
+        discrepancy = round(total_footer_tax - net_line_tax, 2)
+        if 0 < abs(discrepancy) <= 0.05:
+            eligible = [
+                it for it in line_items
+                if (it.line_type or "") in ("Stock Item", "Service", "Additional Charge")
+                and (it.line_total or 0.0) > 0
+            ]
+            if eligible:
+                target = max(eligible, key=lambda it: it.line_total or 0.0)
+                new_tax = round((target.tax_amount or 0.0) + discrepancy, 2)
+                target.tax_amount = new_tax
+                base = _item_base(target)
+                target.line_total = round(base + new_tax, 2)
+
+    return line_items, tax_was_allocated
 
 # =======================================================================
 # Context-Aware Line Type Classification (Tally: Stock Item / Service /
@@ -545,6 +798,10 @@ def _is_candidate_physical_item(item: InvoiceLineItem) -> bool:
         return False
     return True
 
+_ADDITIONAL_CHARGE_EXPLICIT_PATTERN = re.compile(
+    r'(loading|freight|transport|handling|packaging)', re.IGNORECASE
+)
+
 def classify_line_types(line_items: List[InvoiceLineItem]) -> List[str]:
     """
     Returns one of "Stock Item" / "Service" / "Additional Charge" / "Discount" /
@@ -563,8 +820,17 @@ def classify_line_types(line_items: List[InvoiceLineItem]) -> List[str]:
             line_types.append("Round Off")
         elif _LINE_ITEM_DISCOUNT_PATTERN.search(desc) or amount < 0:
             line_types.append("Discount")
+        elif _ADDITIONAL_CHARGE_EXPLICIT_PATTERN.search(desc):
+            line_types.append("Additional Charge")
+            if item.unit_price is None or item.unit_price == 0:
+                q = item.quantity if item.quantity and item.quantity > 0 else 1.0
+                item.unit_price = round(amount / q, 2)
         elif hsn.startswith("99") or _LINE_ITEM_NON_INVENTORY_PATTERN.search(desc):
-            line_types.append("Additional Charge" if has_inventory_items else "Service")
+            l_type = "Additional Charge" if has_inventory_items else "Service"
+            line_types.append(l_type)
+            if l_type == "Additional Charge" and (item.unit_price is None or item.unit_price == 0):
+                q = item.quantity if item.quantity and item.quantity > 0 else 1.0
+                item.unit_price = round(amount / q, 2)
         else:
             line_types.append("Stock Item")
 
@@ -578,12 +844,11 @@ def classify_line_types(line_items: List[InvoiceLineItem]) -> List[str]:
 def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """
     Resolves an invoice's final line-item rows for downstream export: applies
-    context-aware line classification, proportionally allocates header
-    CGST/SGST/IGST/Cess onto each line, and reconciles header-level Discount /
-    Additional Charges / Round Off against whatever is already itemized in
-    line_items — synthesizing a dedicated row for any uncovered remainder so
-    every rupee of discount, charges, and rounding always appears as its own
-    line, never only as a lump header number (and never twice).
+    context-aware line classification, deterministic 4-Tier Tax Calculation Waterfall
+    (Tier 1 Itemized -> Tier 2 Pre-Tax Base + Gross Total -> Tier 3 Gross Total Only ->
+    Tier 4 Proportional Footer Apportionment), splits taxes by GST regime, enforces strict
+    negative polarity on Discounts, sets Round Off to 0% tax, reconciles header-level
+    remainder rows, and performs paisa reconciliation.
 
     Returns (line_items, header_totals). header_totals["discount_amount"] and
     ["round_off_amount"] are each the sum of the respective line_type's
@@ -594,9 +859,10 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
     Tally export (excel_generator.py); neither should re-derive this logic.
     """
     cgst = sgst = igst = cess = 0.0
-    for tb in invoice.tax_breakdown:
-        t_type = str(tb.tax_type).upper()
-        t_amt = tb.tax_amount or 0.0
+    for tb in (invoice.tax_breakdown or []):
+        t_type = str(getattr(tb, "tax_type", "") or (tb.get("tax_type") if isinstance(tb, dict) else "")).upper()
+        t_amt = getattr(tb, "tax_amount", 0.0) if not isinstance(tb, dict) else tb.get("tax_amount")
+        t_amt = float(t_amt or 0.0)
         if "CGST" in t_type:
             cgst = t_amt
         elif "SGST" in t_type:
@@ -606,33 +872,80 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
         elif "CESS" in t_type:
             cess = t_amt
 
-    if cgst == 0.0 and sgst == 0.0 and igst == 0.0 and invoice.raw_ocr_response:
+    if cgst == 0.0 and sgst == 0.0 and igst == 0.0 and invoice.raw_ocr_response and isinstance(invoice.raw_ocr_response, dict):
         cgst = float(invoice.raw_ocr_response.get("cgst") or 0.0)
         sgst = float(invoice.raw_ocr_response.get("sgst") or 0.0)
         igst = float(invoice.raw_ocr_response.get("igst") or 0.0)
 
-    v_gst = (invoice.vendor_tax_id or "").strip()
-    c_gst = (invoice.client_tax_id or "29AAACS1234K1Z8").strip()
-    same_state = bool(v_gst and len(v_gst) >= 2 and c_gst and len(c_gst) >= 2 and v_gst[:2] == c_gst[:2])
-    diff_state = bool(v_gst and len(v_gst) >= 2 and c_gst and len(c_gst) >= 2 and v_gst[:2] != c_gst[:2])
+    regime = classify_gst_regime(
+        invoice.tax_breakdown,
+        cgst=cgst,
+        sgst=sgst,
+        igst=igst,
+        vendor_tax_id=invoice.vendor_tax_id,
+        client_tax_id=invoice.client_tax_id,
+    )
 
-    if cgst == 0.0 and sgst == 0.0 and igst == 0.0 and invoice.tax_amount:
-        total_tax = invoice.tax_amount or 0.0
-        if diff_state:
-            igst = total_tax
+    total_footer_tax = cgst + sgst + igst + cess
+    if total_footer_tax == 0.0 and invoice.tax_amount:
+        total_footer_tax = float(invoice.tax_amount)
+        if regime == "IGST":
+            igst = total_footer_tax
         else:
-            cgst = total_tax / 2.0
-            sgst = total_tax / 2.0
-
-    is_inter_state = igst > 0 or diff_state
-
-    header_tax_total = cgst + sgst + igst + cess
-    cgst_ratio = (cgst / header_tax_total) if header_tax_total > 0 else 0.0
-    sgst_ratio = (sgst / header_tax_total) if header_tax_total > 0 else 0.0
-    igst_ratio = (igst / header_tax_total) if header_tax_total > 0 else 0.0
-    cess_ratio = (cess / header_tax_total) if header_tax_total > 0 else 0.0
+            cgst = round(total_footer_tax / 2.0, 2)
+            sgst = round(total_footer_tax - cgst, 2)
 
     resolved_line_types = classify_line_types(invoice.line_items)
+
+    def _calc_item_taxable(it: InvoiceLineItem) -> float:
+        if it.unit_price is not None and it.quantity is not None:
+            return round((it.quantity * it.unit_price) - (it.discount or 0.0), 2)
+        elif it.line_total is not None and it.tax_amount is not None and it.line_total > it.tax_amount:
+            return round(it.line_total - it.tax_amount, 2)
+        elif it.line_total is not None:
+            return round(it.line_total, 2)
+        elif it.unit_price is not None:
+            return round(it.unit_price, 2)
+        return 0.0
+
+    # 1. If an explicit subtotal exists and is less than grand_total, that IS the pre-tax base.
+    if invoice.subtotal and invoice.total_amount and 0 < invoice.subtotal < invoice.total_amount:
+        sum_taxable = float(invoice.subtotal)
+    elif invoice.subtotal and invoice.subtotal > 0 and (not invoice.total_amount or abs(invoice.subtotal - invoice.total_amount) > 1.0):
+        sum_taxable = float(invoice.subtotal)
+    else:
+        raw_sum = sum(
+            max(0.0, _calc_item_taxable(it))
+            for it, lt in zip(invoice.line_items, resolved_line_types)
+            if lt not in ("Discount", "Round Off")
+        )
+        if invoice.total_amount and total_footer_tax and abs(raw_sum - invoice.total_amount) <= max(1.0, invoice.total_amount * 0.01):
+            sum_taxable = float(invoice.total_amount - total_footer_tax)
+        else:
+            sum_taxable = raw_sum if raw_sum > 0 else float(invoice.subtotal or 0.0)
+
+    footer_rate = extract_footer_rate(
+        invoice.tax_breakdown,
+        invoice.raw_ocr_response,
+        total_footer_tax=total_footer_tax,
+        total_taxable_base=sum_taxable,
+    )
+
+    pricing_is_inclusive = False
+    if invoice.line_items and invoice.total_amount:
+        tot = invoice.total_amount
+        sub = invoice.subtotal
+        raw_sum = round(sum(
+            (it.line_total if it.line_total is not None else _calc_item_taxable(it))
+            for it in invoice.line_items
+        ), 2)
+        tol = max(1.0, tot * 0.01)
+        matches_grand = abs(raw_sum - tot) <= tol
+        matches_sub = sub is not None and abs(raw_sum - sub) <= tol
+        if matches_grand and not matches_sub:
+            pricing_is_inclusive = True
+        elif abs(raw_sum - tot) <= 1.0 and tot > (sub or 0.0):
+            pricing_is_inclusive = True
 
     line_items: List[Dict[str, Any]] = []
     discount_line_items_total = 0.0
@@ -646,87 +959,152 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
             or (item.line_total is not None and item.line_total < 0)
             or (item.unit_price is not None and item.unit_price < 0)
         )
+        is_round_off_line = (
+            line_type == "Round Off"
+            or bool(_LINE_ITEM_ROUND_OFF_PATTERN.search(desc))
+        )
 
-        taxable_amount = None
-        if item.unit_price is not None and item.quantity is not None:
-            taxable_amount = round((item.quantity * item.unit_price) - (item.discount or 0.0), 2)
-        elif item.line_total is not None and item.tax_amount is not None:
-            taxable_amount = round(item.line_total - item.tax_amount, 2)
-        elif item.line_total is not None:
-            taxable_amount = round(item.line_total, 2)
-        elif item.unit_price is not None:
-            taxable_amount = round(item.unit_price, 2)
+        taxable_amount = _calc_item_taxable(item)
+        l_rate = item.tax_rate_percent
+        l_total = item.line_total
 
-        line_tax = item.tax_amount or 0.0
-        line_cgst = round(line_tax * cgst_ratio, 2)
-        line_sgst = round(line_tax * sgst_ratio, 2)
-        line_igst = round(line_tax * igst_ratio, 2)
-        line_cess = round(line_tax * cess_ratio, 2)
+        if is_round_off_line:
+            final_line_type = "Round Off"
+            final_desc = desc if desc.strip() else "Round Off"
+            raw_val = item.unit_price if item.unit_price is not None else (l_total if l_total is not None else 0.0)
+            final_taxable = round(raw_val, 2)
+            final_unit_price = round(raw_val, 2)
+            final_qty = 1.0
+            final_tax_rate = 0.0
+            final_cgst = 0.0
+            final_sgst = 0.0
+            final_igst = 0.0
+            final_cess = 0.0
+            final_tax_amt = 0.0
+            final_total = final_taxable
+            final_discount_amount = 0.0
 
-        line_tax_rate = item.tax_rate_percent or 0.0
-        if (
-            not line_cgst and not line_sgst and not line_igst
-            and taxable_amount and abs(taxable_amount) > 0
-            and line_tax_rate > 0
-            and not is_discount_line
-        ):
-            if is_inter_state:
-                line_igst = round(abs(taxable_amount) * (line_tax_rate / 100.0), 2)
-                line_cgst = 0.0
-                line_sgst = 0.0
-            else:
-                half_rate = line_tax_rate / 2.0
-                line_cgst = round(abs(taxable_amount) * (half_rate / 100.0), 2)
-                line_sgst = round(abs(taxable_amount) * (half_rate / 100.0), 2)
-                line_igst = 0.0
-            line_tax = line_cgst + line_sgst + line_igst
-
-        if is_discount_line:
+        elif is_discount_line:
             final_line_type = "Discount"
             final_desc = desc if desc.strip() else "Discount"
             raw_mag = abs(
                 item.unit_price if item.unit_price is not None
-                else (taxable_amount if taxable_amount is not None
-                else (item.line_total or 0.0))
+                else (l_total if l_total is not None else taxable_amount)
             )
+            # Strictly negative polarity: val = -abs(val)
             final_taxable = -round(raw_mag, 2)
             final_unit_price = -round(raw_mag, 2)
             final_qty = 1.0
             final_discount_amount = 0.0
 
-            if line_tax and line_tax != 0:
-                final_tax_amt = -round(abs(line_tax), 2)
-                final_cgst = -round(abs(line_cgst), 2)
-                final_sgst = -round(abs(line_sgst), 2)
-                final_igst = -round(abs(line_igst), 2)
-                final_cess = -round(abs(line_cess), 2)
+            disc_tax = item.tax_amount or 0.0
+            disc_rate = item.tax_rate_percent or 0.0
+            if disc_tax and disc_tax != 0:
+                final_tax_amt = -round(abs(disc_tax), 2)
+                final_tax_rate = snap_gst_rate(disc_rate)
+                if regime == "IGST":
+                    final_igst = final_tax_amt
+                    final_cgst = 0.0
+                    final_sgst = 0.0
+                else:
+                    half_cgst = round(abs(final_tax_amt) / 2.0, 2)
+                    final_cgst = -half_cgst
+                    final_sgst = -round(abs(final_tax_amt) - half_cgst, 2)
+                    final_igst = 0.0
+                final_cess = 0.0
             else:
+                final_tax_rate = snap_gst_rate(disc_rate) if disc_rate else 0.0
                 final_tax_amt = 0.0
                 final_cgst = 0.0
                 final_sgst = 0.0
                 final_igst = 0.0
                 final_cess = 0.0
 
-            final_total = round(final_taxable + final_tax_amt, 2)
+            final_total = -round(abs(final_taxable) + abs(final_tax_amt), 2)
             discount_line_items_total += raw_mag
+
         else:
             final_line_type = line_type
             final_desc = desc
-            final_taxable = taxable_amount
-            final_unit_price = item.unit_price
-            final_qty = item.quantity
-            final_tax_amt = item.tax_amount
-            final_cgst = line_cgst
-            final_sgst = line_sgst
-            final_igst = line_igst
-            final_cess = line_cess
-            final_total = item.line_total
-            # Rule 1: a discount baked into a Stock Item / Service line's OWN taxable
-            # amount is surfaced in that row's own Discount Amount column — never as
-            # a separate row of its own.
+            final_qty = item.quantity if item.quantity is not None else 1.0
+            final_unit_price = item.unit_price if item.unit_price is not None else taxable_amount
             final_discount_amount = round(item.discount or 0.0, 2)
+
+            line_tax_rate = 0.0
+            line_tax_amt = 0.0
+            line_final_total = 0.0
+
+            # Tier 1: Itemized Bill (Explicit Rate & Taxable Amount Present)
+            if l_rate is not None and l_rate > 0 and taxable_amount > 0:
+                line_tax_rate = snap_gst_rate(l_rate)
+                if l_total is not None and l_total > taxable_amount and abs(taxable_amount * (1.0 + line_tax_rate / 100.0) - l_total) <= max(1.0, l_total * 0.01):
+                    line_tax_amt = round(l_total - taxable_amount, 2)
+                    line_final_total = round(l_total, 2)
+                else:
+                    line_tax_amt = round(taxable_amount * (line_tax_rate / 100.0), 2)
+                    line_final_total = round(taxable_amount + line_tax_amt, 2)
+
+            # Tier 2: Pre-Tax Base + Gross Line Total Present (The S.R. AGENCIES Pattern)
+            elif (
+                taxable_amount > 0
+                and l_total is not None
+                and l_total > 0
+                and round(l_total, 2) > round(taxable_amount, 2)
+                and (l_rate is None or l_rate <= 0)
+            ):
+                line_tax_amt = round(l_total - taxable_amount, 2)
+                raw_rate = (line_tax_amt / taxable_amount) * 100.0
+                line_tax_rate = snap_gst_rate(raw_rate)
+                line_final_total = round(l_total, 2)
+
+            # Tier 3: Gross Total Only (Inclusive Pricing / Retail Format)
+            elif (
+                l_total is not None
+                and l_total > 0
+                and footer_rate > 0
+                and (
+                    taxable_amount <= 0
+                    or pricing_is_inclusive
+                    or (matches_grand and abs(taxable_amount - l_total) <= 0.01)
+                )
+            ):
+                line_tax_rate = snap_gst_rate(footer_rate)
+                taxable_amount = round(l_total / (1.0 + (line_tax_rate / 100.0)), 2)
+                line_tax_amt = round(l_total - taxable_amount, 2)
+                line_final_total = round(l_total, 2)
+                final_unit_price = taxable_amount
+
+            # Tier 4: Multi-Item Proportional Footer Apportionment
+            elif total_footer_tax > 0 and taxable_amount > 0 and sum_taxable > 0:
+                weight_i = taxable_amount / sum_taxable
+                line_tax_amt = round(total_footer_tax * weight_i, 2)
+                raw_rate = (total_footer_tax / sum_taxable) * 100.0
+                line_tax_rate = snap_gst_rate(raw_rate)
+                line_final_total = round(taxable_amount + line_tax_amt, 2)
+
+            else:
+                line_tax_rate = snap_gst_rate(l_rate) if l_rate else 0.0
+                line_tax_amt = 0.0
+                line_final_total = round(taxable_amount, 2) if taxable_amount > 0 else (round(l_total, 2) if l_total else 0.0)
+
+            final_taxable = taxable_amount
+            final_tax_rate = line_tax_rate
+            final_tax_amt = line_tax_amt
+            final_total = line_final_total
+
+            # Tax Component Splitting (Interstate vs Intrastate)
+            if regime == "IGST":
+                final_igst = round(line_tax_amt, 2)
+                final_cgst = 0.0
+                final_sgst = 0.0
+            else:
+                final_cgst = round(line_tax_amt / 2.0, 2)
+                final_sgst = round(line_tax_amt - final_cgst, 2)
+                final_igst = 0.0
+            final_cess = round(getattr(item, "cess", 0.0) or 0.0, 2)
+
             if line_type == "Additional Charge":
-                charge_line_items_total += abs(final_taxable if final_taxable is not None else (final_total or 0.0))
+                charge_line_items_total += abs(final_taxable if final_taxable is not None else final_total)
 
         line_items.append({
             "line_type": final_line_type,
@@ -742,7 +1120,7 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
             "discount_amount": final_discount_amount,
             "taxable_amount": final_taxable,
             "taxable_value": final_taxable,
-            "tax_rate_percent": item.tax_rate_percent,
+            "tax_rate_percent": final_tax_rate,
             "cgst": final_cgst,
             "sgst": final_sgst,
             "igst": final_igst,
@@ -772,15 +1150,6 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
                 except (ValueError, TypeError):
                     continue
 
-    # An invoice-level discount is apportioned across the GST-rate buckets of the
-    # goods/services it actually applies to (Additional Charges are never part of
-    # the discountable base), producing one "Discount" row per rate bucket instead
-    # of a single row with one blended rate — so each row's tax matches a real
-    # statutory rate rather than an average that doesn't correspond to anything on
-    # the invoice. A line item that already carries its own per-line discount
-    # still participates here: the two discounts represent different things (a
-    # negotiated per-item price vs. an invoice-wide rebate) and are not mutually
-    # exclusive.
     remaining_discount = round(inv_discount - discount_line_items_total, 2)
     if remaining_discount > 0.01:
         buckets: Dict[float, float] = {}
@@ -810,14 +1179,13 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
                 continue
 
             if rate > 0:
-                half_rate = rate / 2.0
-                if is_inter_state:
+                if regime == "IGST":
                     disc_igst = -round(bucket_discount * (rate / 100.0), 2)
                     disc_cgst = 0.0
                     disc_sgst = 0.0
                 else:
-                    disc_cgst = -round(bucket_discount * (half_rate / 100.0), 2)
-                    disc_sgst = -round(bucket_discount * (half_rate / 100.0), 2)
+                    disc_cgst = -round(bucket_discount * (rate / 200.0), 2)
+                    disc_sgst = -round(bucket_discount * (rate / 100.0) - abs(disc_cgst), 2)
                     disc_igst = 0.0
                 disc_cess = 0.0
                 disc_tax_amt = disc_cgst + disc_sgst + disc_igst
@@ -852,8 +1220,7 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
                 "total_amount": disc_total,
             })
 
-    # --- Header-level Additional Charges reconciliation (Rule 3): every charge
-    # must land as its own Item-wise row — never as a lump header column. ---
+    # --- Header-level Additional Charges reconciliation (Rule 3) ---
     inv_charges = abs(invoice.additional_charges or 0.0)
     remaining_charges = round(inv_charges - charge_line_items_total, 2)
     if remaining_charges > 0.01:
@@ -881,8 +1248,7 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
             "total_amount": remaining_charges,
         })
 
-    # --- Header-level Round Off reconciliation (Rule 4). Signed — a round-off can
-    # legitimately go either direction, unlike Discount/Charges. ---
+    # --- Header-level Round Off reconciliation (Rule 4) ---
     round_off_line_items_total = round(
         sum((li.get("taxable_amount") or 0.0) for li in line_items if li["line_type"] == "Round Off"), 2
     )
@@ -918,17 +1284,37 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
             "total_amount": remaining_round_off,
         })
 
+    # --- Paisa Reconciliation: Check sum(line_tax) vs total_footer_tax. ---
+    # If discrepancy is <= 0.05, absorb the difference into the line item with the highest taxable value.
+    if total_footer_tax > 0:
+        net_line_tax = round(sum(
+            (li.get("tax_amount") or 0.0)
+            for li in line_items
+            if li.get("line_type") != "Round Off"
+        ), 2)
+        discrepancy = round(total_footer_tax - net_line_tax, 2)
+        if 0 < abs(discrepancy) <= 0.05:
+            eligible_items = [
+                li for li in line_items
+                if li.get("line_type") in ("Stock Item", "Service", "Additional Charge")
+                and (li.get("taxable_amount") or 0.0) > 0
+            ]
+            if eligible_items:
+                target_item = max(eligible_items, key=lambda li: li.get("taxable_amount") or 0.0)
+                new_tax = round((target_item.get("tax_amount") or 0.0) + discrepancy, 2)
+                target_item["tax_amount"] = new_tax
+                if regime == "IGST":
+                    target_item["igst"] = round((target_item.get("igst") or 0.0) + discrepancy, 2)
+                else:
+                    new_cgst = round(new_tax / 2.0, 2)
+                    target_item["cgst"] = new_cgst
+                    target_item["sgst"] = round(new_tax - new_cgst, 2)
+                target_item["line_total"] = round((target_item.get("taxable_amount") or 0.0) + new_tax, 2)
+                target_item["total_amount"] = target_item["line_total"]
+
     header_discount_total = round(
         sum(abs(li.get("taxable_amount") or 0.0) for li in line_items if li["line_type"] == "Discount"), 2
     )
-    # The invoice-level Discount total must also roll up every per-item discount
-    # baked into a Stock Item/Service row's own Discount Amount column (Rule 1 —
-    # "discount_amount" is 0 on every Discount/Additional Charge/Round Off row by
-    # construction, so this only ever adds genuine per-item discounts, never
-    # double-counts a standalone Discount row already summed above). Total Discount
-    # = (header/standalone Discount rows) + sum(per-item discount_amount across all
-    # line items) — real money taken off the invoice either way, and Column M should
-    # reflect the full picture regardless of which form the model reported it in.
     line_item_discount_sum = round(sum(li.get("discount_amount") or 0.0 for li in line_items), 2)
     header_discount_total = round(header_discount_total + line_item_discount_sum, 2)
 
@@ -936,10 +1322,19 @@ def build_line_item_rows(invoice: InvoiceData) -> Tuple[List[Dict[str, Any]], Di
         sum((li.get("taxable_amount") or 0.0) for li in line_items if li["line_type"] == "Round Off"), 2
     )
 
+    if regime == "IGST":
+        header_igst = total_footer_tax if total_footer_tax > 0 else round(sum(li.get("igst") or 0.0 for li in line_items), 2)
+        header_cgst = 0.0
+        header_sgst = 0.0
+    else:
+        header_cgst = cgst if cgst > 0 else round(sum(li.get("cgst") or 0.0 for li in line_items), 2)
+        header_sgst = sgst if sgst > 0 else round(sum(li.get("sgst") or 0.0 for li in line_items), 2)
+        header_igst = 0.0
+
     header_totals = {
-        "cgst": cgst,
-        "sgst": sgst,
-        "igst": igst,
+        "cgst": header_cgst,
+        "sgst": header_sgst,
+        "igst": header_igst,
         "cess": cess,
         "discount_amount": header_discount_total,
         "round_off_amount": header_round_off_total,
@@ -1362,10 +1757,10 @@ def extract_invoice_data(file_bytes: bytes, filename: str, mime_type: str) -> In
         inv_num_clean = str(inv_num).strip() if inv_num else None
         
         inv_date = parsed.get("invoice_date")
-        inv_date_clean = str(inv_date).strip() if inv_date else None
+        inv_date_clean = normalize_date_to_iso(inv_date) if inv_date else None
         
         due_date = parsed.get("due_date")
-        due_date_clean = str(due_date).strip() if due_date else None
+        due_date_clean = normalize_date_to_iso(due_date) if due_date else None
         
         pay_terms = parsed.get("payment_terms")
         pay_terms_clean = str(pay_terms).strip() if pay_terms else None
@@ -1444,12 +1839,26 @@ def extract_invoice_data(file_bytes: bytes, filename: str, mime_type: str) -> In
         # case we're in by comparing the raw line amounts against the invoice's
         # own extracted Grand Total and Subtotal — whichever the raw sum already
         # matches tells us whether line amounts are inclusive or pre-tax.
+        doc_tax_rate = 0.0
+        if tax_breakdown:
+            doc_tax_rate = extract_footer_rate(
+                tax_breakdown,
+                parsed,
+                total_footer_tax=tax_amount or 0.0,
+                total_taxable_base=subtotal or 0.0,
+            )
+        if doc_tax_rate <= 0 and tax_amount and subtotal and subtotal > 0:
+            doc_tax_rate = snap_gst_rate((float(tax_amount) / float(subtotal)) * 100.0)
+
         pricing_is_inclusive = False
         if line_items_raw and total_amount:
             tolerance = max(1.0, total_amount * 0.01)
             matches_grand_total = abs(raw_amount_sum - total_amount) <= tolerance
             matches_subtotal = subtotal is not None and abs(raw_amount_sum - subtotal) <= tolerance
+            
             if matches_grand_total and not matches_subtotal:
+                pricing_is_inclusive = True
+            elif abs(raw_amount_sum - total_amount) <= 1.0 and total_amount > (subtotal or 0.0):
                 pricing_is_inclusive = True
 
         line_items: List[InvoiceLineItem] = []
@@ -1463,23 +1872,41 @@ def extract_invoice_data(file_bytes: bytes, filename: str, mime_type: str) -> In
             raw_amount = _raw_line_amount(li)
             has_base_info = li.get("line_total") is not None or u_price is not None
 
-            if pricing_is_inclusive and raw_amount:
-                # raw_amount already includes tax — reverse out the taxable base
-                # instead of adding tax on top of it a second time.
-                if l_tax_pct:
-                    base_amount = round(raw_amount / (1 + l_tax_pct / 100.0), 2)
+            # Section D: Multi-Column Disambiguation (Basic Price vs Gross Line Amount)
+            effective_rate = l_tax_pct if (l_tax_pct and l_tax_pct > 0) else doc_tax_rate
+            is_disambiguated = False
+            if u_price is not None and u_price > 0 and raw_amount > 0 and qty > 0 and effective_rate > 0:
+                basic_calc = round(qty * u_price - l_disc, 2)
+                # Check if abs((qty * unit_price) * (1 + doc_tax_rate / 100) - raw_amount) <= 1.0
+                if raw_amount > basic_calc and abs(basic_calc * (1.0 + effective_rate / 100.0) - raw_amount) <= max(1.0, raw_amount * 0.01):
+                    base_amount = basic_calc
                     l_tax_amt = round(raw_amount - base_amount, 2)
-                elif l_tax_amt:
-                    base_amount = round(raw_amount - l_tax_amt, 2)
-                    l_tax_pct = round((l_tax_amt / base_amount) * 100.0, 2) if base_amount > 0 else None
-                l_total = raw_amount
-            else:
-                base_amount = raw_amount
-                if l_tax_amt is None and l_tax_pct:
-                    l_tax_amt = round(base_amount * l_tax_pct / 100.0, 2)
-                elif l_tax_amt and not l_tax_pct and base_amount > 0:
-                    l_tax_pct = round((l_tax_amt / base_amount) * 100.0, 2)
-                l_total = round(base_amount + (l_tax_amt or 0.0), 2) if (has_base_info or l_tax_amt) else None
+                    l_tax_pct = effective_rate
+                    l_total = raw_amount
+                    is_disambiguated = True
+
+            if not is_disambiguated:
+                if pricing_is_inclusive and raw_amount:
+                    # raw_amount already includes tax — reverse out the taxable base
+                    # instead of adding tax on top of it a second time.
+                    if l_tax_pct:
+                        base_amount = round(raw_amount / (1 + l_tax_pct / 100.0), 2)
+                        l_tax_amt = round(raw_amount - base_amount, 2)
+                    elif l_tax_amt:
+                        base_amount = round(raw_amount - l_tax_amt, 2)
+                        l_tax_pct = round((l_tax_amt / base_amount) * 100.0, 2) if base_amount > 0 else None
+                    elif doc_tax_rate > 0:
+                        l_tax_pct = doc_tax_rate
+                        base_amount = round(raw_amount / (1 + l_tax_pct / 100.0), 2)
+                        l_tax_amt = round(raw_amount - base_amount, 2)
+                    l_total = raw_amount
+                else:
+                    base_amount = raw_amount
+                    if l_tax_amt is None and l_tax_pct:
+                        l_tax_amt = round(base_amount * l_tax_pct / 100.0, 2)
+                    elif l_tax_amt and not l_tax_pct and base_amount > 0:
+                        l_tax_pct = round((l_tax_amt / base_amount) * 100.0, 2)
+                    l_total = round(base_amount + (l_tax_amt or 0.0), 2) if (has_base_info or l_tax_amt) else None
 
             item_conf = parse_float_safe(li.get("confidence")) or 0.9
             line_items.append(InvoiceLineItem(
@@ -1496,17 +1923,20 @@ def extract_invoice_data(file_bytes: bytes, filename: str, mime_type: str) -> In
                 confidence=item_conf
             ))
 
-        # Back-allocate footer-only tax (CGST/SGST/IGST declared only in the
-        # summary table) onto individual line items so downstream reconciliation,
-        # exports, and Google Sheet sync see accurate item-level tax figures.
-        # Skipped when pricing is already inclusive — those line_total figures
-        # are final and back-allocating more tax on top would double-count it.
-        if not pricing_is_inclusive:
-            line_items, tax_was_back_allocated = back_allocate_footer_tax_to_line_items(
-                line_items, tax_amount, tax_breakdown, discount_amount=discount
-            )
-        else:
-            tax_was_back_allocated = False
+        # Back-allocate footer-only tax using the deterministic 4-Tier Tax Waterfall
+        # onto individual line items so downstream reconciliation, exports, and UI see accurate item-level tax figures.
+        line_items, tax_was_back_allocated = back_allocate_footer_tax_to_line_items(
+            line_items=line_items,
+            tax_amount=tax_amount,
+            tax_breakdown=tax_breakdown,
+            discount_amount=discount,
+            subtotal=subtotal,
+            total_amount=total_amount,
+            pricing_is_inclusive=pricing_is_inclusive,
+            vendor_tax_id=vendor_tax_id,
+            client_tax_id=client_tax_id,
+            raw_ocr_response=parsed
+        )
 
         # Rule 9 has the model itemize each freight/shipping/packing charge as its
         # own line_items row instead of only reporting a lump "additional_charges"

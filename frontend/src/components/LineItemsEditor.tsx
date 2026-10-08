@@ -2,6 +2,17 @@ import React from 'react';
 import { InvoiceLineItem } from '../types';
 import { Plus, Trash2, Copy } from 'lucide-react';
 
+export const AUTHORIZED_GST_RATES = [
+  0, 0.05, 0.1, 0.25, 0.5, 1, 1.5, 2.5, 3, 5, 6, 7.5, 12, 18, 28, 40
+];
+
+export const isAuthorizedGSTRate = (rate: any): boolean => {
+  if (rate === null || rate === undefined || rate === '') return true;
+  const num = Number(rate);
+  if (isNaN(num)) return false;
+  return AUTHORIZED_GST_RATES.some((valid) => Math.abs(valid - num) < 0.01);
+};
+
 interface LineItemsEditorProps {
   items: InvoiceLineItem[];
   currencySymbol: string;
@@ -37,11 +48,29 @@ export const LineItemsEditor: React.FC<LineItemsEditorProps> = ({
       const disc = parseNum(item.discount, 0);
       const taxRate = parseNum(item.tax_rate_percent, 0);
 
-      const baseAmount = Math.max(0, qty * price - disc);
-      const taxAmt = (baseAmount * taxRate) / 100;
+      const isDiscount = (item.line_type === 'Discount') ||
+        (item.description && /discount|rebate|\bdisc\b|\bcd\b/i.test(item.description)) ||
+        price < 0;
+      const rawBase = qty * price - disc;
+      const baseAmount = isDiscount ? -Math.abs(rawBase) : Math.max(0, rawBase);
 
-      item.tax_amount = round2(taxAmt);
-      item.line_total = round2(baseAmount + taxAmt);
+      const existingTotal = parseNum(nextItems[index].line_total, 0);
+      const forwardTotal = round2(baseAmount + (baseAmount * taxRate) / 100);
+
+      // If price was NOT edited and line_total already matches the gross amount,
+      // keep line_total as the gross total instead of double-taxing.
+      if (
+        field === 'tax_rate_percent' &&
+        existingTotal > 0 &&
+        Math.abs(forwardTotal - existingTotal) <= Math.max(1.0, existingTotal * 0.01)
+      ) {
+        item.tax_amount = round2(existingTotal - baseAmount);
+        item.line_total = existingTotal;
+      } else {
+        const taxAmt = (baseAmount * taxRate) / 100;
+        item.tax_amount = round2(taxAmt);
+        item.line_total = round2(baseAmount + taxAmt);
+      }
     } else if (field === 'line_total') {
       item.line_total = parseNum(value, 0);
     }
@@ -202,14 +231,30 @@ export const LineItemsEditor: React.FC<LineItemsEditorProps> = ({
                   </td>
                   {/* Tax Rate % */}
                   <td className="py-2 px-3">
-                    <input
-                      type="number"
-                      step="any"
-                      value={item.tax_rate_percent ?? ''}
-                      onChange={(e) => handleItemChange(idx, 'tax_rate_percent', e.target.value)}
-                      className="w-full bg-white border border-slate-200 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 rounded px-2.5 py-1.5 text-xs text-right text-slate-800 font-mono outline-none"
-                      placeholder="0%"
-                    />
+                    {(() => {
+                      const isRateValid = isAuthorizedGSTRate(item.tax_rate_percent);
+                      return (
+                        <div className="relative">
+                          <input
+                            type="number"
+                            step="any"
+                            value={item.tax_rate_percent ?? ''}
+                            onChange={(e) => handleItemChange(idx, 'tax_rate_percent', e.target.value)}
+                            className={`w-full px-2 py-1 text-xs border rounded text-right font-mono outline-none ${
+                              !isRateValid 
+                                ? 'border-rose-500 bg-rose-50 text-rose-700 font-bold focus:ring-rose-500' 
+                                : 'border-slate-200 focus:border-blue-600 focus:ring-blue-600 text-slate-800'
+                            }`}
+                            placeholder="0%"
+                          />
+                          {!isRateValid && (
+                            <span className="text-[10px] text-rose-600 font-semibold block text-right mt-0.5">
+                              Not Acceptable
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </td>
                   {/* Line Total */}
                   <td className="py-2 px-3 text-right">

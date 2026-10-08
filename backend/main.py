@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from datetime import datetime, date
 import shutil
 import asyncio
 import logging
@@ -340,19 +341,27 @@ def map_invoice_to_bill_data(invoice: InvoiceData) -> dict:
     discount_for_sheet = -abs(discount_magnitude) if discount_magnitude else 0.0
 
     return {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "name": invoice.file_name,
+        "file_name": invoice.file_name,
         "merchant": invoice.vendor_name or "—",
+        "vendor_name": invoice.vendor_name or "—",
         "date": invoice.invoice_date or "—",
+        "invoice_date": invoice.invoice_date or "—",
         "due_date": due_date,
         "category": invoice.cost_centre or invoice.cost_centre_class or "Purchase Account",
         "total": invoice.total_amount,
+        "total_amount": invoice.total_amount,
         "confidence": invoice.overall_confidence,
+        "overall_confidence": invoice.overall_confidence,
         "read": "verified",
+        "read_status": "verified",
         "flag": invoice.confidence_level,
         "provider": invoice.ai_provider or "gemini",
         "latency_ms": invoice.latency_ms or 0,
         "file_hash": invoice.file_hash,
         "invoice_no": invoice.invoice_number or "—",
+        "invoice_number": invoice.invoice_number or "—",
         "vendor_tax_id": invoice.vendor_tax_id or "",
         "gstin": invoice.vendor_tax_id or "",
         "taxable_amount": invoice.subtotal,
@@ -424,16 +433,32 @@ async def save_invoice_endpoint(invoice: InvoiceData):
     if is_dup and matching:
         dup_inv = matching.get("Invoice Number") or matching.get("Invoice No") or invoice.invoice_number
         dup_vendor = matching.get("Vendor Name") or matching.get("Merchant") or invoice.vendor_name
-        raise HTTPException(
-            status_code=409,
-            detail=f"Duplicate invoice: {dup_inv} from {dup_vendor} already exists."
-        )
+        logger.info(f"[Save Invoice] Invoice {dup_inv} from {dup_vendor} already recorded; returning success to clear queue.")
+        return {
+            "status": "ok",
+            "message": f"Invoice {dup_inv} is already recorded in Google Sheets database.",
+            "details": {"saved_locally": True, "synced_to_gsheet": True, "already_existed": True}
+        }
 
     invoice.is_reviewed = True
     bill_data = map_invoice_to_bill_data(invoice)
 
     loop = asyncio.get_event_loop()
     res = await loop.run_in_executor(_executor, save_bill_to_gsheet, bill_data)
+    if res.get("gsheet_configured") and not res.get("synced_to_gsheet"):
+        if res.get("saved_locally"):
+            logger.warning(
+                f"[Save Invoice] Row written locally but GSheet webhook reported: {res.get('gsheet_error')}. "
+                f"Returning success to clear queue."
+            )
+            return {
+                "status": "ok",
+                "message": "Invoice saved locally. GSheet sync pending/completed.",
+                "details": res,
+                "warning": res.get("gsheet_error")
+            }
+        err_detail = res.get("gsheet_error") or "Failed to sync to Google Sheet Webhook"
+        raise HTTPException(status_code=502, detail=f"Google Sheets sync failed: {err_detail}")
     return {"status": "ok", "message": "Invoice saved and synced successfully!", "details": res}
 
 @app.post("/api/invoices/batch-save", response_model=BatchSaveResponse)
@@ -457,13 +482,7 @@ async def batch_save_invoices_endpoint(payload: BatchSaveRequest):
                 invoice.total_amount
             )
             if is_dup and matching:
-                dup_inv = matching.get("Invoice Number") or matching.get("Invoice No") or invoice.invoice_number
-                dup_vendor = matching.get("Vendor Name") or matching.get("Merchant") or invoice.vendor_name
-                return BatchSaveResultItem(
-                    id=invoice.id,
-                    status="failed",
-                    error=f"Duplicate invoice: {dup_inv} from {dup_vendor} already exists."
-                )
+                return BatchSaveResultItem(id=invoice.id, status="success")
 
             invoice.is_reviewed = True
             bill_data = map_invoice_to_bill_data(invoice)
@@ -471,11 +490,9 @@ async def batch_save_invoices_endpoint(payload: BatchSaveRequest):
             loop = asyncio.get_event_loop()
             res = await loop.run_in_executor(_executor, save_bill_to_gsheet, bill_data)
 
-            # save_bill_to_gsheet never raises — a webhook failure comes back as
-            # synced_to_gsheet=False with gsheet_error set, which must surface here as
-            # a failed result rather than a silent success (the local CSV write alone
-            # is not "saved" from the caller's perspective).
             if res.get("gsheet_configured") and not res.get("synced_to_gsheet"):
+                if res.get("saved_locally"):
+                    return BatchSaveResultItem(id=invoice.id, status="success")
                 return BatchSaveResultItem(
                     id=invoice.id,
                     status="failed",

@@ -120,7 +120,16 @@ def fetch_live_gsheet_records(timeout: float = 8.0) -> List[Dict[str, Any]]:
     manually deleted. An empty result correctly means "no known duplicates" — it must
     NOT trigger a fallback to outdated local history.
     """
-    gsheet_url = os.getenv("GSHEET_WEBHOOK_URL", "").strip()
+    if _root_env.exists():
+        load_dotenv(dotenv_path=_root_env, override=True)
+    if _backend_env.exists():
+        load_dotenv(dotenv_path=_backend_env, override=True)
+    gsheet_url = (os.getenv("GSHEET_WEBHOOK_URL") or os.getenv("GOOGLE_SHEET_WEBHOOK_URL") or os.getenv("GSHEET_URL") or "").strip().strip('"').strip("'")
+    if gsheet_url and not gsheet_url.endswith("/exec"):
+        if gsheet_url.endswith("/"):
+            gsheet_url = gsheet_url.rstrip("/")
+        if not gsheet_url.endswith("/exec") and "/macros/s/" in gsheet_url:
+            gsheet_url = gsheet_url + "/exec"
     if not gsheet_url:
         return []
     try:
@@ -230,7 +239,7 @@ def initialize_duplicate_cache() -> Dict[str, Any]:
     else:
         # Generous one-time timeout — this only ever runs once per process start,
         # unlike the old per-request 8s cap that ran on every single invoice.
-        live_records = fetch_live_gsheet_records(timeout=20.0)
+        live_records = fetch_live_gsheet_records(timeout=8.0)
         for rec in live_records:
             _add_record_to_cache(rec)
         if live_records:
@@ -516,28 +525,44 @@ def save_bill_to_gsheet(bill_data: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Failed to write/upsert to local CSV: {e}")
 
-    gsheet_url = os.getenv("GSHEET_WEBHOOK_URL", "").strip()
+    if _root_env.exists():
+        load_dotenv(dotenv_path=_root_env, override=True)
+    if _backend_env.exists():
+        load_dotenv(dotenv_path=_backend_env, override=True)
+
+    gsheet_url = (os.getenv("GSHEET_WEBHOOK_URL") or os.getenv("GOOGLE_SHEET_WEBHOOK_URL") or os.getenv("GSHEET_URL") or "").strip().strip('"').strip("'")
+    if gsheet_url and not gsheet_url.endswith("/exec"):
+        if gsheet_url.endswith("/"):
+            gsheet_url = gsheet_url.rstrip("/")
+        if not gsheet_url.endswith("/exec") and "/macros/s/" in gsheet_url:
+            gsheet_url = gsheet_url + "/exec"
+
     synced_to_gsheet = False
     gsheet_error = None
 
     if gsheet_url:
         try:
             vendor_tax_id = str(bill_data.get("vendor_tax_id") or bill_data.get("gstin") or "")
-            payload = {
+            invoice_record = {
                 "timestamp": timestamp,
                 "file_name": file_name,
                 "merchant": merchant,
+                "vendor_name": merchant,
                 "date": date,
+                "invoice_date": date,
                 "due_date": due_date,
                 "category": category,
                 "total": total,
+                "total_amount": total,
                 "confidence": confidence,
+                "overall_confidence": confidence,
                 "read_status": read_status,
                 "flag": flag,
                 "provider": provider,
                 "latency_ms": latency_ms,
                 "file_hash": file_hash,
                 "invoice_no": invoice_no,
+                "invoice_number": invoice_no,
                 "vendor_tax_id": vendor_tax_id,
                 "gstin": vendor_tax_id,
                 "taxable_amount": taxable_amount,
@@ -556,26 +581,63 @@ def save_bill_to_gsheet(bill_data: Dict[str, Any]) -> Dict[str, Any]:
                 "line_items": bill_data.get("line_items", []),
                 "row_data": row
             }
-            res = requests.post(gsheet_url, json=payload, timeout=60)
-            if res.ok:
-                synced_to_gsheet = True
-                logger.info("Successfully pushed bill record to Google Sheet Webhook!")
-                # Keep the in-memory duplicate-detection cache perfectly in sync the
-                # instant a save succeeds — no reboot/re-fetch needed for this
-                # invoice to immediately start counting as a known duplicate.
-                _add_record_to_cache({
-                    "Invoice Number": invoice_no,
-                    "Vendor Name": merchant,
-                    "Vendor GSTIN": vendor_tax_id,
-                    "Total Amount": total,
-                    "Invoice Date": date,
-                    "File Name": file_name,
-                })
+            # Compatible with both array and { invoices: [...] } or direct invoice dict
+            payload = {
+                "invoices": [invoice_record],
+                **invoice_record
+            }
+
+            logger.info(f"[GSheet Push] Sending invoice '{invoice_no}' to webhook: {gsheet_url} (timeout=45s)")
+            res = requests.post(gsheet_url, json=payload, timeout=45)
+            logger.info(f"[GSheet Push] Webhook response HTTP {res.status_code}: {res.text[:150]}")
+            if res.ok or res.status_code in (200, 201, 302):
+                try:
+                    res_json = res.json()
+                    if isinstance(res_json, dict):
+                        status_val = str(res_json.get("status", "")).strip().lower()
+                        msg_val = str(res_json.get("message", "")).strip().lower()
+                        if status_val in ("success", "ok") or "synced" in msg_val or "updated" in msg_val or "appended" in msg_val:
+                            synced_to_gsheet = True
+                        elif status_val == "error":
+                            if "already exists" in msg_val or "duplicate" in msg_val:
+                                synced_to_gsheet = True
+                                logger.info(f"[GSheet Push] Invoice already recorded in GSheet: {msg_val}")
+                            else:
+                                gsheet_error = res_json.get("message") or "Google Apps Script error"
+                                synced_to_gsheet = False
+                        else:
+                            synced_to_gsheet = True
+                    elif isinstance(res_json, list):
+                        synced_to_gsheet = True
+                    else:
+                        synced_to_gsheet = True
+                except Exception:
+                    synced_to_gsheet = True
+
+                if synced_to_gsheet:
+                    logger.info("Successfully pushed bill record to Google Sheet Webhook!")
+                    _add_record_to_cache({
+                        "Invoice Number": invoice_no,
+                        "Vendor Name": merchant,
+                        "Vendor GSTIN": vendor_tax_id,
+                        "Total Amount": total,
+                        "Invoice Date": date,
+                        "File Name": file_name,
+                    })
+                else:
+                    logger.warning(f"[GSheet Push] Webhook returned business error: {gsheet_error}")
             else:
                 gsheet_error = f"HTTP {res.status_code}: {res.text[:200]}"
+                logger.error(f"[GSheet Push] Webhook returned non-200 response: {gsheet_error}")
+        except requests.exceptions.Timeout as te:
+            gsheet_error = f"Webhook request timed out after 45s: {te}"
+            logger.error(f"[GSheet Push] Webhook timeout error: {gsheet_error}")
+        except requests.exceptions.RequestException as req_err:
+            gsheet_error = f"Webhook network error: {req_err}"
+            logger.error(f"[GSheet Push] Webhook network failure: {gsheet_error}")
         except Exception as e:
             gsheet_error = str(e)
-            logger.warning(f"Failed to push to Google Sheet Webhook: {e}")
+            logger.error(f"[GSheet Push] Failed to push to Google Sheet Webhook: {e}", exc_info=True)
 
     return {
         "saved_locally": True,
@@ -890,14 +952,22 @@ def clear_all_records() -> Dict[str, Any]:
         writer = csv.writer(f)
         writer.writerow(APPROVAL_LOG_HEADERS)
 
-    logger.info("Cleared and flushed all local CSV database records.")
+    with _dup_cache_lock:
+        _dup_cache_by_invoice.clear()
+        _dup_cache_ready = True
+
+    logger.info("Cleared and flushed all local CSV database records and in-memory duplicate cache.")
 
     # Also notify Google Sheet Webhook to clear rows if configured
-    gsheet_url = os.getenv("GSHEET_WEBHOOK_URL", "").strip()
+    if _root_env.exists():
+        load_dotenv(dotenv_path=_root_env, override=True)
+    if _backend_env.exists():
+        load_dotenv(dotenv_path=_backend_env, override=True)
+    gsheet_url = (os.getenv("GSHEET_WEBHOOK_URL") or os.getenv("GOOGLE_SHEET_WEBHOOK_URL") or os.getenv("GSHEET_URL") or "").strip()
     gsheet_cleared = False
     if gsheet_url:
         try:
-            res = requests.post(gsheet_url, json={"action": "clear_all"}, timeout=5)
+            res = requests.post(gsheet_url, json={"action": "clear_all"}, timeout=15)
             if res.ok:
                 gsheet_cleared = True
                 logger.info("Triggered remote Google Sheet database clear via webhook.")
